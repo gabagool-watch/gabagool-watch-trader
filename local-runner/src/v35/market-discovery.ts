@@ -43,40 +43,54 @@ async function fetchMarketsFromBackend(): Promise<MarketToken[]> {
     return [];
   }
 
-  try {
-    const url = `${SUPABASE_URL}/functions/v1/get-market-tokens`;
-    console.log(`[MarketDiscovery] Calling get-market-tokens...`);
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'apikey': SUPABASE_KEY,
-      },
-      body: JSON.stringify({ mode: '15m' }),
-      signal: AbortSignal.timeout(15000),
-    });
+  const url = `${SUPABASE_URL}/functions/v1/get-market-tokens`;
+  const maxRetries = 3;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[MarketDiscovery] Calling get-market-tokens (attempt ${attempt}/${maxRetries})...`);
+      
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'apikey': SUPABASE_KEY,
+        },
+        body: JSON.stringify({ mode: '15m' }),
+        signal: AbortSignal.timeout(20000), // V36.3.5: increased timeout
+      });
 
-    if (!response.ok) {
-      const text = await response.text();
-      console.log(`[MarketDiscovery] get-market-tokens failed: ${response.status} - ${text}`);
+      if (!response.ok) {
+        const text = await response.text();
+        console.log(`[MarketDiscovery] get-market-tokens failed: ${response.status} - ${text}`);
+        if (attempt < maxRetries) {
+          await new Promise(r => setTimeout(r, 2000 * attempt)); // exponential backoff
+          continue;
+        }
+        return [];
+      }
+
+      const data = await response.json();
+      
+      if (!data.success || !Array.isArray(data.markets)) {
+        console.log(`[MarketDiscovery] get-market-tokens returned no markets`);
+        return [];
+      }
+
+      console.log(`[MarketDiscovery] get-market-tokens returned ${data.markets.length} markets`);
+      return data.markets;
+    } catch (error) {
+      console.log(`[MarketDiscovery] get-market-tokens error (attempt ${attempt}): ${error}`);
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 2000 * attempt)); // exponential backoff
+        continue;
+      }
       return [];
     }
-
-    const data = await response.json();
-    
-    if (!data.success || !Array.isArray(data.markets)) {
-      console.log(`[MarketDiscovery] get-market-tokens returned no markets`);
-      return [];
-    }
-
-    console.log(`[MarketDiscovery] get-market-tokens returned ${data.markets.length} markets`);
-    return data.markets;
-  } catch (error) {
-    console.log(`[MarketDiscovery] get-market-tokens error: ${error}`);
-    return [];
   }
+  
+  return [];
 }
 
 /**
