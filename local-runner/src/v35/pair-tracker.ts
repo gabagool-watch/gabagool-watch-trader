@@ -1,7 +1,7 @@
 // ============================================================
 // V36 PAIR TRACKER - INDEPENDENT PAIR LIFECYCLE MANAGEMENT
 // ============================================================
-// Version: V36.3.1 - "Race Condition Fix"
+// Version: V36.3.6 - "Market Expiry Reset"
 //
 // V36.3.1 CRITICAL FIX:
 // - Set makerPlaced=true BEFORE async placeOrder call
@@ -204,6 +204,38 @@ export class PairTracker {
     return Array.from(this.pairs.values()).filter(p => 
       p.marketSlug === marketSlug
     );
+  }
+  
+  /**
+   * V36.3.6: Reset all pairs for a specific market (when market expires)
+   * This prevents stale pairs from blocking new pairs in the next market cycle
+   */
+  resetMarketPairs(marketSlug: string): { reset: number; active: number } {
+    const marketPairs = this.getMarketPairs(marketSlug);
+    const activePairs = marketPairs.filter(p => 
+      p.status === 'PENDING_ENTRY' || p.status === 'WAITING_HEDGE'
+    );
+    
+    let resetCount = 0;
+    for (const pair of marketPairs) {
+      // Mark all non-terminal pairs as EXPIRED
+      if (pair.status === 'PENDING_ENTRY' || pair.status === 'WAITING_HEDGE') {
+        pair.status = 'EXPIRED';
+        pair.updatedAt = Date.now();
+        resetCount++;
+      }
+      // Delete the pair entirely
+      this.pairs.delete(pair.id);
+    }
+    
+    // Also clear the market start time
+    this.clearMarketStart(marketSlug);
+    
+    if (resetCount > 0) {
+      console.log(`[PairTracker] 🔄 Reset ${resetCount} pairs for expired market: ${marketSlug.slice(-30)}`);
+    }
+    
+    return { reset: resetCount, active: activePairs.length };
   }
   
   /**

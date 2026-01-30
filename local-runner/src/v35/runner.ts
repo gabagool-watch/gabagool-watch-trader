@@ -1,13 +1,12 @@
 // ============================================================
 // V36 RUNNER - PAIR-BASED MARKET MAKING
 // ============================================================
-// Version: V36.2.9 - "Immediate Maker Placement"
+// Version: V36.3.6 - "Market Expiry Reset"
 //
-// V36.2.9 KEY CHANGES:
-// - FIX: Maker is now placed IMMEDIATELY after taker fill
-// - No more WebSocket dependency for taker fill detection
-// - placeOrder() returns fill status directly from REST API
-// - syncOrders() completely disabled in pair-based mode
+// V36.3.6 KEY CHANGES:
+// - FIX: Reset pairs when market expires to prevent stale pairs blocking new trades
+// - Pairs for expired markets are marked EXPIRED and deleted
+// - Market start times are cleared to allow proper startup delay for new markets
 //
 // ============================================================
 // V36 STRATEGY SUMMARY (Taker-Maker Pair Trading)
@@ -571,6 +570,13 @@ function cleanupExpiredMarkets(): void {
       const pairStats = pairTracker.getStats();
       if (pairStats.completedPairs > 0) {
         log(`   📦 Pairs: ${pairStats.completedPairs} completed | P&L: $${pairStats.totalPnl.toFixed(2)} | Avg CPP: $${pairStats.avgCpp.toFixed(3)}`);
+      }
+      
+      // V36.3.6: CRITICAL - Reset all pairs for this expired market!
+      // This prevents stale pairs from blocking new trades in the next cycle
+      const resetResult = pairTracker.resetMarketPairs(slug);
+      if (resetResult.reset > 0) {
+        log(`   🔄 Reset ${resetResult.reset} stale pairs for expired market`);
       }
       
       // V35.4.0: Clear any ban for this market (it's expired, we'll get a new one)
