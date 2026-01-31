@@ -1,29 +1,31 @@
 // ============================================================
 // V36 PAIR TRACKER - INDEPENDENT PAIR LIFECYCLE MANAGEMENT
 // ============================================================
-// Version: V36.5.1 - "Independent Maker Sizing"
+// Version: V36.5.2 - "FIFO Hedge Aggregation"
+//
+// V36.5.2 CRITICAL ENHANCEMENT:
+// - Maker orders can now hedge MULTIPLE takers with one order
+// - When scaling up for $1 minimum, older unhedged takers are included
+// - Fill allocation uses FIFO (oldest takers hedged first)
+// - Example: 2x 10-share takers hedged by 1x 20-share maker
+// - Prevents wasteful "extra" maker shares that don't hedge anything
 //
 // V36.5.1 CRITICAL FIX:
 // - Maker size is calculated INDEPENDENTLY from taker size
 // - Formula: makerSize = max(takerSize, ceil(1.00 / makerPrice))
-// - This ensures maker orders always meet $1.00 minimum, even when
-//   cheap side price is low (e.g., $0.05 → needs 20 shares, not 10)
-// - Prevents "maker_price_below_minimum" blocks that caused imbalances
+// - This ensures maker orders always meet $1.00 minimum
 //
 // V36.4.3 CRITICAL FIX:
 // - Early Whitelisting: Register orderId IMMEDIATELY after API response
 // - Fill Audit Fallback: Poll API for fills if WebSocket misses them
-// - This guarantees ALL fills are logged, even with WS race conditions
 //
 // V36.3.1 CRITICAL FIX:
 // - Set makerPlaced=true BEFORE async placeOrder call
-// - This prevents race conditions where REST + WebSocket both try to place
-// - If order fails, we reset makerPlaced=false to allow retry
+// - Prevents race conditions where REST + WebSocket both try to place
 //
 // V36.3.0 CRITICAL FIX:
 // - MAKER ORDER IS PLACED ONLY ONCE - in openPair() after taker fill
 // - onFill() now only tracks fills, does NOT place maker orders
-// - This prevents the double-ordering bug that wiped the account
 //
 // CORE CONCEPT:
 // Each trade is an INDEPENDENT "Pair" with its own lifecycle:
@@ -75,6 +77,12 @@ export interface PendingPair {
   makerFilledAt?: number;
   makerFilledPrice?: number;
   makerFilledSize?: number;
+  
+  // V36.5.2: FIFO Hedge Aggregation
+  // When a maker order hedges multiple takers, track the linked pairs
+  linkedPairIds?: string[];           // IDs of other pairs sharing this maker order
+  makerAllocatedSize?: number;        // How many maker shares were allocated to THIS pair
+  isPrimaryMakerPair?: boolean;       // True if this pair "owns" the maker order
   
   // Emergency hedge (if reversal detected)
   emergencyOrderId?: string;
@@ -230,6 +238,24 @@ export class PairTracker {
     return Array.from(this.pairs.values()).filter(p => 
       p.marketSlug === marketSlug
     );
+  }
+  
+  /**
+   * V36.5.2: Get unhedged pairs that need the same maker side
+   * Used for FIFO aggregation - find older pairs we can hedge together
+   * 
+   * Returns pairs sorted by createdAt (oldest first = FIFO)
+   */
+  getUnhedgedPairsForMakerSide(marketSlug: string, makerSide: V35Side): PendingPair[] {
+    return Array.from(this.pairs.values())
+      .filter(p => 
+        p.marketSlug === marketSlug &&
+        p.makerSide === makerSide &&
+        p.status === 'WAITING_HEDGE' &&
+        !p.makerOrderId &&  // No maker order placed yet
+        p.takerFilledAt     // Taker is filled
+      )
+      .sort((a, b) => a.createdAt - b.createdAt);  // FIFO: oldest first
   }
   
   /**
@@ -478,10 +504,13 @@ export class PairTracker {
           status: 'PENDING_ENTRY',
         }).catch(() => {});
         
-        // Update pair state
+        // Update pair state - V36.5.2: Set WAITING_HEDGE immediately after taker fill
+        // This allows getUnhedgedPairsForMakerSide() to find this pair for aggregation
         pair.takerFilledAt = Date.now();
         pair.takerFilledPrice = filledPrice;
         pair.takerFilledSize = filledSize;
+        pair.status = 'WAITING_HEDGE';  // V36.5.2: Update status before maker placement
+        pair.updatedAt = Date.now();
         
         // Calculate and place maker
         const makerPlaceResult = await this.placeMakerOrder(pair, market, filledPrice, filledSize);
@@ -562,76 +591,128 @@ export class PairTracker {
     const makerTokenId = pair.makerSide === 'UP' ? market.upTokenId : market.downTokenId;
     
     // =========================================================================
-    // V36.5.1: INDEPENDENT MAKER SIZE CALCULATION
+    // V36.5.2: FIFO HEDGE AGGREGATION
     // =========================================================================
-    // Problem: Taker @ $0.90 -> 10 shares = $9 ✅ meets $1 min
-    //          Maker @ $0.05 -> 10 shares = $0.50 ❌ BLOCKED by exchange!
+    // When maker size needs scaling for $1 minimum, check if we can hedge
+    // multiple older takers with the same order (more capital efficient).
     //
-    // Solution: Scale maker size UP only when needed to meet $1 minimum.
-    // Formula: makerSize = max(takerFilledSize, ceil(1.00 / makerPrice))
-    // 
-    // Examples:
-    //   - makerPrice=$0.05, takerSize=10 -> need ceil(1.00/0.05)=20 shares
-    //   - makerPrice=$0.40, takerSize=10 -> need ceil(1.00/0.40)=3, use 10
+    // Example:
+    //   - Taker A: 10 UP @ $0.90 (waiting for hedge)
+    //   - Taker B: 10 UP @ $0.91 (waiting for hedge) <- current
+    //   - Maker price: $0.05 -> need ceil($1 / $0.05) = 20 shares minimum
+    //   - Solution: One 20-share maker hedges BOTH takers!
     // =========================================================================
     const MIN_ORDER_VALUE = 1.00;
     const minSharesForMaker = Math.ceil(MIN_ORDER_VALUE / clampedMakerPrice);
-    const makerSize = Math.max(takerFilledSize, minSharesForMaker);
     
-    const wasScaledUp = makerSize > takerFilledSize;
+    // Find other unhedged pairs that need the same maker side (FIFO order)
+    const unhedgedPairs = this.getUnhedgedPairsForMakerSide(market.slug, pair.makerSide)
+      .filter(p => p.id !== pair.id);  // Exclude current pair
+    
+    // Calculate total unhedged taker exposure we could cover
+    let totalTakerSharesAvailable = takerFilledSize;
+    const pairsToHedge: { pair: PendingPair; allocation: number }[] = [
+      { pair, allocation: takerFilledSize }
+    ];
+    
+    // V36.5.2: If we need to scale up, try to aggregate older pairs first
+    if (minSharesForMaker > takerFilledSize && unhedgedPairs.length > 0) {
+      console.log(`[PairTracker] 🔍 V36.5.2: Checking FIFO aggregation (need ${minSharesForMaker}, have ${takerFilledSize})`);
+      
+      // Add older unhedged pairs until we reach minSharesForMaker or run out
+      for (const olderPair of unhedgedPairs) {
+        if (totalTakerSharesAvailable >= minSharesForMaker) break;
+        
+        const olderTakerSize = olderPair.takerFilledSize || olderPair.takerSize;
+        
+        // Lock this pair too (prevent race conditions)
+        if (olderPair.makerPlaced) continue;
+        olderPair.makerPlaced = true;
+        
+        totalTakerSharesAvailable += olderTakerSize;
+        pairsToHedge.push({ pair: olderPair, allocation: olderTakerSize });
+        
+        console.log(`[PairTracker]    + Added ${olderPair.id}: ${olderTakerSize} shares (total: ${totalTakerSharesAvailable})`);
+      }
+    }
+    
+    // Final maker size: max of (total taker shares, minimum required)
+    const makerSize = Math.max(totalTakerSharesAvailable, minSharesForMaker);
+    
+    const isAggregated = pairsToHedge.length > 1;
+    const wasScaledUp = makerSize > totalTakerSharesAvailable;
+    
+    if (isAggregated) {
+      console.log(`[PairTracker] 🔗 V36.5.2: FIFO Aggregation - hedging ${pairsToHedge.length} pairs with 1 maker order`);
+      pairsToHedge.forEach((p, i) => {
+        console.log(`[PairTracker]    [${i + 1}] ${p.pair.id}: ${p.allocation} ${p.pair.takerSide} shares`);
+      });
+    }
+    
     if (wasScaledUp) {
-      console.log(`[PairTracker] 📈 V36.5.1: Maker size scaled: ${takerFilledSize} → ${makerSize} shares (min $1 @ $${clampedMakerPrice.toFixed(3)})`);
+      console.log(`[PairTracker] 📈 V36.5.2: Maker scaled: ${totalTakerSharesAvailable} → ${makerSize} (min $1 @ $${clampedMakerPrice.toFixed(3)})`);
     }
     
     console.log(`[PairTracker] 📝 Placing MAKER: ${makerSize} ${pair.makerSide} @ $${clampedMakerPrice.toFixed(3)}`);
     console.log(`[PairTracker]    Calculation: $${this.config.targetCpp.toFixed(2)} - $${takerFilledPrice.toFixed(3)} = $${makerPrice.toFixed(3)}`);
-    if (wasScaledUp) {
-      console.log(`[PairTracker]    ⚠️ Maker value: ${makerSize} × $${clampedMakerPrice.toFixed(3)} = $${(makerSize * clampedMakerPrice).toFixed(2)}`);
-    }
     
     try {
       const makerResult = await placeOrder({
         tokenId: makerTokenId,
         side: 'BUY',
         price: clampedMakerPrice,
-        size: makerSize,  // V36.5.1: Use scaled size
+        size: makerSize,
         orderType: 'GTC',
       });
       
       if (!makerResult.success || !makerResult.orderId) {
         console.log(`[PairTracker] ❌ Maker order failed: ${makerResult.error}`);
-        pair.makerPlaced = false; // Release lock on failure
+        // Release locks on all pairs
+        pairsToHedge.forEach(p => { p.pair.makerPlaced = false; });
         return { success: false, error: makerResult.error || 'maker_failed' };
       }
       
       // =========================================================================
       // V36.4.3 CRITICAL: EARLY WHITELISTING - BEFORE ANY VERIFICATION!
       // =========================================================================
-      // Register order ID for WebSocket IMMEDIATELY after API response.
-      // This MUST happen before the slow getOrder() verification in polymarket.ts.
-      // If we wait, fast fills will be rejected as "foreign fills" by user-ws.ts.
-      // =========================================================================
       registerOurOrderId(makerResult.orderId);
       console.log(`[PairTracker] 🔑 V36.4.3: Early-whitelisted orderId ${makerResult.orderId.slice(0, 12)}...`);
       
-      // Update pair state (makerPlaced already true)
-      pair.makerOrderId = makerResult.orderId;
-      pair.makerPrice = clampedMakerPrice;
-      pair.makerSize = makerSize;  // V36.5.1: Store actual (possibly scaled) maker size
-      pair.status = 'WAITING_HEDGE';
-      pair.updatedAt = Date.now();
+      // =========================================================================
+      // V36.5.2: Link all pairs to this maker order
+      // =========================================================================
+      const linkedPairIds = pairsToHedge.map(p => p.pair.id);
+      
+      for (const { pair: p, allocation } of pairsToHedge) {
+        p.makerOrderId = makerResult.orderId;
+        p.makerPrice = clampedMakerPrice;
+        p.makerSize = makerSize;  // Total maker order size
+        p.makerAllocatedSize = allocation;  // This pair's share of the fill
+        p.linkedPairIds = linkedPairIds;
+        p.isPrimaryMakerPair = (p.id === pair.id);  // Primary pair "owns" the order
+        p.status = 'WAITING_HEDGE';
+        p.updatedAt = Date.now();
+      }
       
       console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
-      console.log(`[PairTracker] 🟠 ${pair.id} MAKER PLACED`);
-      console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${pair.takerSide} @ $${takerFilledPrice.toFixed(2)} (filled)`);
-      console.log(`[PairTracker]    MAKER: ${makerSize} ${pair.makerSide} @ $${clampedMakerPrice.toFixed(2)} (open)${wasScaledUp ? ' [SCALED]' : ''}`);
+      if (isAggregated) {
+        console.log(`[PairTracker] 🟠 AGGREGATED MAKER PLACED (${pairsToHedge.length} pairs)`);
+        console.log(`[PairTracker]    MAKER: ${makerSize} ${pair.makerSide} @ $${clampedMakerPrice.toFixed(2)} [FIFO AGGREGATED]`);
+        for (const { pair: p, allocation } of pairsToHedge) {
+          console.log(`[PairTracker]    └─ ${p.id}: ${allocation} shares`);
+        }
+      } else {
+        console.log(`[PairTracker] 🟠 ${pair.id} MAKER PLACED`);
+        console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${pair.takerSide} @ $${takerFilledPrice.toFixed(2)} (filled)`);
+        console.log(`[PairTracker]    MAKER: ${makerSize} ${pair.makerSide} @ $${clampedMakerPrice.toFixed(2)} (open)${wasScaledUp ? ' [SCALED]' : ''}`);
+      }
       console.log(`[PairTracker]    PROJECTED CPP: $${(takerFilledPrice + clampedMakerPrice).toFixed(3)}`);
       console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
       
       // Log pair event to database
       logPairEvent({
         pairId: pair.id,
-        eventType: 'pair_maker_placed',
+        eventType: isAggregated ? 'pair_maker_aggregated' : 'pair_maker_placed',
         marketSlug: market.slug,
         asset: market.asset,
         takerSide: pair.takerSide,
@@ -639,8 +720,10 @@ export class PairTracker {
         takerSize: takerFilledSize,
         makerSide: pair.makerSide,
         makerPrice: clampedMakerPrice,
-        makerSize: makerSize,  // V36.5.1: Log actual size
-        makerSizeScaled: wasScaledUp,  // V36.5.1: Track if scaling was applied
+        makerSize: makerSize,
+        makerSizeScaled: wasScaledUp,
+        linkedPairCount: pairsToHedge.length,  // V36.5.2: Track aggregation
+        linkedPairIds: isAggregated ? linkedPairIds : undefined,
         status: 'WAITING_HEDGE',
       }).catch(() => {});
       
@@ -694,6 +777,7 @@ export class PairTracker {
         pair.takerFilledAt = Date.now();
         pair.takerFilledPrice = fill.price;
         pair.takerFilledSize = fill.size;
+        pair.status = 'WAITING_HEDGE';  // V36.5.2: Set immediately for aggregation lookup
         pair.updatedAt = Date.now();
         
         // V36.3.0: Place maker if not already placed
@@ -707,7 +791,6 @@ export class PairTracker {
           }
         } else {
           console.log(`[PairTracker] ✓ Maker already placed - just updating taker info`);
-          pair.status = 'WAITING_HEDGE';
         }
         
         return { pairUpdated: true, pair };
@@ -715,8 +798,77 @@ export class PairTracker {
       
       // =========================================================================
       // MAKER FILL TRACKING
+      // V36.5.2: Handle FIFO allocation when multiple pairs share one maker order
       // =========================================================================
       if (pair.makerOrderId === fill.orderId && pair.status === 'WAITING_HEDGE') {
+        
+        // V36.5.2: Check if this is an aggregated maker (linked to multiple pairs)
+        const linkedIds = pair.linkedPairIds || [pair.id];
+        const isAggregated = linkedIds.length > 1;
+        
+        if (isAggregated) {
+          // FIFO allocation across all linked pairs
+          console.log(`[PairTracker] 🔗 V36.5.2: Aggregated maker fill - allocating to ${linkedIds.length} pairs`);
+          
+          let remainingFillSize = fill.size;
+          
+          // Process pairs in FIFO order (sorted by createdAt)
+          const linkedPairs = linkedIds
+            .map(id => this.pairs.get(id))
+            .filter((p): p is PendingPair => p !== undefined && p.status === 'WAITING_HEDGE')
+            .sort((a, b) => a.createdAt - b.createdAt);
+          
+          for (const linkedPair of linkedPairs) {
+            if (remainingFillSize <= 0) break;
+            
+            const allocationNeeded = linkedPair.makerAllocatedSize || linkedPair.takerFilledSize || linkedPair.takerSize;
+            const allocated = Math.min(remainingFillSize, allocationNeeded);
+            remainingFillSize -= allocated;
+            
+            // Update this linked pair
+            linkedPair.makerFilledAt = Date.now();
+            linkedPair.makerFilledPrice = fill.price;
+            linkedPair.makerFilledSize = allocated;
+            linkedPair.status = 'HEDGED';
+            linkedPair.updatedAt = Date.now();
+            
+            // Calculate actual CPP for this pair
+            const takerCost = linkedPair.takerFilledPrice || linkedPair.takerPrice;
+            linkedPair.actualCpp = takerCost + fill.price;
+            linkedPair.pnl = (1.0 - linkedPair.actualCpp) * allocated;
+            
+            console.log(`[PairTracker]    ✓ ${linkedPair.id}: ${allocated} shares allocated | CPP: $${linkedPair.actualCpp.toFixed(3)} | P&L: $${linkedPair.pnl.toFixed(2)}`);
+            
+            // Log per-pair hedge event
+            logPairEvent({
+              pairId: linkedPair.id,
+              eventType: 'pair_hedged_fifo',
+              marketSlug: market.slug,
+              asset: market.asset,
+              takerSide: linkedPair.takerSide,
+              takerPrice: linkedPair.takerFilledPrice || linkedPair.takerPrice,
+              takerSize: linkedPair.takerFilledSize || linkedPair.takerSize,
+              makerSide: linkedPair.makerSide,
+              makerPrice: fill.price,
+              makerSize: allocated,
+              fillPrice: fill.price,
+              fillSize: allocated,
+              cpp: linkedPair.actualCpp,
+              pnl: linkedPair.pnl,
+              status: 'HEDGED',
+              aggregatedFrom: linkedIds.length,
+            }).catch(() => {});
+          }
+          
+          console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+          console.log(`[PairTracker] 🟢 AGGREGATED MAKER FILLED - ${linkedPairs.length} pairs hedged!`);
+          console.log(`[PairTracker]    Total fill: ${fill.size} ${pair.makerSide} @ $${fill.price.toFixed(2)}`);
+          console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
+          
+          return { pairUpdated: true, pair };
+        }
+        
+        // Standard single-pair flow (no aggregation)
         pair.makerFilledAt = Date.now();
         pair.makerFilledPrice = fill.price;
         pair.makerFilledSize = fill.size;
