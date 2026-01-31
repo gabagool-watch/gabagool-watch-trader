@@ -61,24 +61,44 @@ export function V35ExpirySnapshots() {
     refetchInterval: 30000,
   });
 
-  // Fetch fills for selected market
+  // Fetch bot config for wallet address
+  const { data: botConfig } = useQuery({
+    queryKey: ["bot-config-wallet"],
+    queryFn: async () => {
+      const { data } = await supabase
+        .from("bot_config")
+        .select("polymarket_address")
+        .eq("id", "00000000-0000-0000-0000-000000000001")
+        .maybeSingle();
+      return data;
+    },
+  });
+
+  // Fetch fills for selected market - ONLY from user's wallet
   const { data: marketFills, isLoading: fillsLoading } = useQuery({
-    queryKey: ["v35-market-fills", selectedMarket?.market_slug],
+    queryKey: ["v35-market-fills", selectedMarket?.market_slug, botConfig?.polymarket_address],
     queryFn: async () => {
       if (!selectedMarket?.market_slug) return [];
       
-      const { data, error } = await supabase
+      let query = supabase
         .from("v35_fills")
-        .select("fill_ts, side, price, size")
+        .select("fill_ts, side, price, size, wallet_address")
         .eq("market_slug", selectedMarket.market_slug)
         .order("fill_ts", { ascending: true });
+      
+      // Filter by wallet if configured
+      if (botConfig?.polymarket_address) {
+        query = query.eq("wallet_address", botConfig.polymarket_address.toLowerCase());
+      }
+      
+      const { data, error } = await query;
 
       if (error) throw error;
       
       // Note: In v35_fills, 'side' is already the outcome (UP/DOWN), not the trade direction
       return (data || []).map(f => ({
         ts: new Date(f.fill_ts).getTime(),
-        side: 'BUY', // For now assume all fills are buys (position building)
+        side: 'BUY', // All fills are buys (position building)
         outcome: f.side || 'UP', // side is actually UP/DOWN
         fill_price: f.price,
         fill_qty: f.size,
@@ -302,7 +322,7 @@ export function V35ExpirySnapshots() {
             </div>
           )}
           
-          {/* Quick stats for selected market */}
+          {/* Quick stats for selected market - THESE ARE THE CORRECT VALUES FROM POLYMARKET API */}
           {selectedMarket && (() => {
             const upCost = selectedMarket.api_up_cost || 0;
             const downCost = selectedMarket.api_down_cost || 0;
@@ -312,35 +332,58 @@ export function V35ExpirySnapshots() {
                                   winner === 'DOWN' ? selectedMarket.api_down_qty : 0;
             const pnl = winner ? (winningShares * 1.0) - totalCost : selectedMarket.predicted_pnl || 0;
             
+            // Check if fills data differs significantly from API data
+            const fillsUpQty = marketFills?.filter(f => f.outcome === 'UP').reduce((s, f) => s + f.fill_qty, 0) || 0;
+            const fillsDownQty = marketFills?.filter(f => f.outcome === 'DOWN').reduce((s, f) => s + f.fill_qty, 0) || 0;
+            const fillsMatch = Math.abs(fillsUpQty - selectedMarket.api_up_qty) < 10 && 
+                               Math.abs(fillsDownQty - selectedMarket.api_down_qty) < 10;
+            
             return (
-              <div className="mt-4 grid grid-cols-5 gap-3 text-sm">
-                <div className="bg-muted/50 rounded-lg p-3">
-                  <div className="text-muted-foreground text-xs">UP Shares</div>
-                  <div className="font-bold text-primary">{selectedMarket.api_up_qty.toFixed(1)}</div>
-                  <div className="text-muted-foreground text-xs">Cost: ${upCost.toFixed(2)}</div>
-                </div>
-                <div className="bg-muted/50 rounded-lg p-3">
-                  <div className="text-muted-foreground text-xs">DOWN Shares</div>
-                  <div className="font-bold text-destructive">{selectedMarket.api_down_qty.toFixed(1)}</div>
-                  <div className="text-muted-foreground text-xs">Cost: ${downCost.toFixed(2)}</div>
-                </div>
-                <div className="bg-muted/50 rounded-lg p-3">
-                  <div className="text-muted-foreground text-xs">Total Cost</div>
-                  <div className="font-bold">${totalCost.toFixed(2)}</div>
-                </div>
-                <div className="bg-muted/50 rounded-lg p-3">
-                  <div className="text-muted-foreground text-xs">Unpaired</div>
-                  <div className={`font-bold ${selectedMarket.unpaired > 50 ? "text-destructive" : "text-warning"}`}>
-                    {selectedMarket.unpaired.toFixed(1)}
+              <div className="mt-4 space-y-3">
+                {/* Warning if fills don't match API */}
+                {marketFills && marketFills.length > 0 && !fillsMatch && (
+                  <div className="bg-warning/10 border border-warning/30 rounded-lg p-3 text-sm">
+                    <div className="flex items-center gap-2 text-warning font-medium">
+                      <AlertTriangle className="h-4 w-4" />
+                      Fill data mismatch met API
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      De chart toont fills uit de database ({fillsUpQty.toFixed(0)} UP, {fillsDownQty.toFixed(0)} DOWN), 
+                      maar de API snapshot toont ({selectedMarket.api_up_qty.toFixed(0)} UP, {selectedMarket.api_down_qty.toFixed(0)} DOWN).
+                      De onderstaande P&L is gebaseerd op de correcte API data.
+                    </div>
                   </div>
-                </div>
-                <div className={`rounded-lg p-3 ${pnl >= 0 ? "bg-primary/10" : "bg-destructive/10"}`}>
-                  <div className="text-muted-foreground text-xs">P&L {winner ? `(${winner} won)` : ''}</div>
-                  <div className={`font-bold ${pnl >= 0 ? "text-primary" : "text-destructive"}`}>
-                    {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                )}
+                
+                <div className="grid grid-cols-5 gap-3 text-sm">
+                  <div className="bg-muted/50 rounded-lg p-3">
+                    <div className="text-muted-foreground text-xs">UP Shares (API)</div>
+                    <div className="font-bold text-emerald-600">{selectedMarket.api_up_qty.toFixed(1)}</div>
+                    <div className="text-muted-foreground text-xs">Cost: ${upCost.toFixed(2)}</div>
                   </div>
-                  <div className="text-muted-foreground text-[10px]">
-                    = ({winningShares.toFixed(0)} × $1) - ${totalCost.toFixed(2)}
+                  <div className="bg-muted/50 rounded-lg p-3">
+                    <div className="text-muted-foreground text-xs">DOWN Shares (API)</div>
+                    <div className="font-bold text-rose-600">{selectedMarket.api_down_qty.toFixed(1)}</div>
+                    <div className="text-muted-foreground text-xs">Cost: ${downCost.toFixed(2)}</div>
+                  </div>
+                  <div className="bg-muted/50 rounded-lg p-3">
+                    <div className="text-muted-foreground text-xs">Total Cost</div>
+                    <div className="font-bold">${totalCost.toFixed(2)}</div>
+                  </div>
+                  <div className="bg-muted/50 rounded-lg p-3">
+                    <div className="text-muted-foreground text-xs">Unpaired</div>
+                    <div className={`font-bold ${selectedMarket.unpaired > 50 ? "text-destructive" : "text-warning"}`}>
+                      {selectedMarket.unpaired.toFixed(1)}
+                    </div>
+                  </div>
+                  <div className={`rounded-lg p-3 ${pnl >= 0 ? "bg-emerald-500/10" : "bg-rose-500/10"}`}>
+                    <div className="text-muted-foreground text-xs">P&L {winner ? `(${winner} won)` : ''}</div>
+                    <div className={`font-bold ${pnl >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                      {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                    </div>
+                    <div className="text-muted-foreground text-[10px]">
+                      = ({winningShares.toFixed(0)} × $1) - ${totalCost.toFixed(2)}
+                    </div>
                   </div>
                 </div>
               </div>
