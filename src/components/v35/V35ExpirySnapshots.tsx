@@ -34,14 +34,6 @@ interface ExpirySnapshot {
   created_at: string;
 }
 
-interface FillData {
-  ts: number;
-  side: string;
-  outcome: string;
-  fill_price: number;
-  fill_qty: number;
-}
-
 export function V35ExpirySnapshots() {
   const [selectedMarket, setSelectedMarket] = useState<ExpirySnapshot | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -61,48 +53,33 @@ export function V35ExpirySnapshots() {
     refetchInterval: 30000,
   });
 
-  // Fetch bot config for wallet address
-  const { data: botConfig } = useQuery({
-    queryKey: ["bot-config-wallet"],
-    queryFn: async () => {
-      const { data } = await supabase
-        .from("bot_config")
-        .select("polymarket_address")
-        .eq("id", "00000000-0000-0000-0000-000000000001")
-        .maybeSingle();
-      return data;
-    },
-  });
-
-  // Fetch fills for selected market - ONLY from user's wallet
-  const { data: marketFills, isLoading: fillsLoading } = useQuery({
-    queryKey: ["v35-market-fills", selectedMarket?.market_slug, botConfig?.polymarket_address],
+  // Fetch inventory snapshots for selected market - reliable position timeline from runner
+  const { data: inventorySnapshots, isLoading: inventoryLoading } = useQuery({
+    queryKey: ["v35-inventory-snapshots", selectedMarket?.market_slug],
     queryFn: async () => {
       if (!selectedMarket?.market_slug) return [];
       
-      let query = supabase
-        .from("v35_fills")
-        .select("fill_ts, side, price, size, wallet_address")
-        .eq("market_slug", selectedMarket.market_slug)
-        .order("fill_ts", { ascending: true });
+      // Extract market_id pattern from slug (e.g., "btc-updown-15m-1769865300")
+      const slugParts = selectedMarket.market_slug.match(/(\d{10,})$/);
+      const marketIdSuffix = slugParts ? slugParts[1] : selectedMarket.market_slug;
       
-      // Filter by wallet if configured
-      if (botConfig?.polymarket_address) {
-        query = query.eq("wallet_address", botConfig.polymarket_address.toLowerCase());
-      }
-      
-      const { data, error } = await query;
+      const { data, error } = await supabase
+        .from("inventory_snapshots")
+        .select("ts, up_shares, down_shares, avg_up_cost, avg_down_cost, pair_cost, state")
+        .or(`market_id.like.%${marketIdSuffix}%,market_id.eq.${selectedMarket.market_slug}`)
+        .order("ts", { ascending: true });
 
       if (error) throw error;
       
-      // Note: In v35_fills, 'side' is already the outcome (UP/DOWN), not the trade direction
-      return (data || []).map(f => ({
-        ts: new Date(f.fill_ts).getTime(),
-        side: 'BUY', // All fills are buys (position building)
-        outcome: f.side || 'UP', // side is actually UP/DOWN
-        fill_price: f.price,
-        fill_qty: f.size,
-      })) as FillData[];
+      return (data || []).map(s => ({
+        ts: s.ts,
+        up_shares: s.up_shares || 0,
+        down_shares: s.down_shares || 0,
+        avg_up_cost: s.avg_up_cost,
+        avg_down_cost: s.avg_down_cost,
+        pair_cost: s.pair_cost,
+        state: s.state || 'UNKNOWN',
+      }));
     },
     enabled: !!selectedMarket?.market_slug,
   });
@@ -304,21 +281,27 @@ export function V35ExpirySnapshots() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <LineChart className="h-5 w-5" />
-              Fill Timeline - {selectedMarket?.market_slug?.slice(-30)}
+              Position Timeline - {selectedMarket?.market_slug?.slice(-30)}
             </DialogTitle>
           </DialogHeader>
           
-          {fillsLoading ? (
-            <div className="py-8 text-center text-muted-foreground">Loading fills...</div>
-          ) : marketFills && marketFills.length > 0 ? (
+          {inventoryLoading ? (
+            <div className="py-8 text-center text-muted-foreground">Loading position timeline...</div>
+          ) : inventorySnapshots && inventorySnapshots.length > 0 ? (
             <V35ImbalanceChart
-              fills={marketFills}
+              inventorySnapshots={inventorySnapshots}
               marketSlug={selectedMarket?.market_slug || ""}
               winner={selectedMarket?.predicted_winning_side as 'UP' | 'DOWN' | undefined}
+              groundTruth={selectedMarket ? {
+                api_up_qty: selectedMarket.api_up_qty,
+                api_down_qty: selectedMarket.api_down_qty,
+                total_cost: selectedMarket.total_cost || 0,
+                predicted_pnl: selectedMarket.predicted_pnl || 0,
+              } : undefined}
             />
           ) : (
             <div className="py-8 text-center text-muted-foreground">
-              No fills found for this market
+              No inventory snapshots found for this market
             </div>
           )}
           
@@ -332,28 +315,8 @@ export function V35ExpirySnapshots() {
                                   winner === 'DOWN' ? selectedMarket.api_down_qty : 0;
             const pnl = winner ? (winningShares * 1.0) - totalCost : selectedMarket.predicted_pnl || 0;
             
-            // Check if fills data differs significantly from API data
-            const fillsUpQty = marketFills?.filter(f => f.outcome === 'UP').reduce((s, f) => s + f.fill_qty, 0) || 0;
-            const fillsDownQty = marketFills?.filter(f => f.outcome === 'DOWN').reduce((s, f) => s + f.fill_qty, 0) || 0;
-            const fillsMatch = Math.abs(fillsUpQty - selectedMarket.api_up_qty) < 10 && 
-                               Math.abs(fillsDownQty - selectedMarket.api_down_qty) < 10;
-            
             return (
               <div className="mt-4 space-y-3">
-                {/* Warning if fills don't match API */}
-                {marketFills && marketFills.length > 0 && !fillsMatch && (
-                  <div className="bg-warning/10 border border-warning/30 rounded-lg p-3 text-sm">
-                    <div className="flex items-center gap-2 text-warning font-medium">
-                      <AlertTriangle className="h-4 w-4" />
-                      Fill data mismatch met API
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      De chart toont fills uit de database ({fillsUpQty.toFixed(0)} UP, {fillsDownQty.toFixed(0)} DOWN), 
-                      maar de API snapshot toont ({selectedMarket.api_up_qty.toFixed(0)} UP, {selectedMarket.api_down_qty.toFixed(0)} DOWN).
-                      De onderstaande P&L is gebaseerd op de correcte API data.
-                    </div>
-                  </div>
-                )}
                 
                 <div className="grid grid-cols-5 gap-3 text-sm">
                   <div className="bg-muted/50 rounded-lg p-3">
