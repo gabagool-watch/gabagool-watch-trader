@@ -63,6 +63,18 @@ export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, grou
     // Round down to nearest 15 minutes to get window start
     const windowStartMs = Math.floor(firstTs / (15 * 60 * 1000)) * (15 * 60 * 1000);
     
+    // Cap by final API quantities when available.
+    // Some historical snapshot rows contain reconciliation outliers (thousands of shares)
+    // that do NOT match the final verified holdings.
+    const capUp = Number.isFinite(groundTruth?.api_up_qty as number)
+      ? (groundTruth!.api_up_qty ?? Number.POSITIVE_INFINITY)
+      : Number.POSITIVE_INFINITY;
+    const capDown = Number.isFinite(groundTruth?.api_down_qty as number)
+      ? (groundTruth!.api_down_qty ?? Number.POSITIVE_INFINITY)
+      : Number.POSITIVE_INFINITY;
+
+    let outlierCount = 0;
+
     // Track running maximum to ensure monotonic increase
     // The bot only buys, so shares should never decrease
     // Decreases in inventory_snapshots are from API reconciliation, not actual sells
@@ -73,10 +85,13 @@ export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, grou
       const rawUp = snapshot.up_shares || 0;
       const rawDown = snapshot.down_shares || 0;
       
+      // Detect outliers vs ground truth (when present)
+      if (rawUp > capUp + 0.0001 || rawDown > capDown + 0.0001) outlierCount += 1;
+
       // Use running maximum to ensure monotonic increase
-      // This filters out API reconciliation dips
-      runningMaxUp = Math.max(runningMaxUp, rawUp);
-      runningMaxDown = Math.max(runningMaxDown, rawDown);
+      // This filters out API reconciliation dips, and clamping removes reconciliation outliers.
+      runningMaxUp = Math.min(capUp, Math.max(runningMaxUp, rawUp));
+      runningMaxDown = Math.min(capDown, Math.max(runningMaxDown, rawDown));
       
       // Calculate elapsed time within the 15-minute window
       const elapsedMs = snapshot.ts - windowStartMs;
@@ -97,8 +112,12 @@ export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, grou
       };
     });
 
-    return { data, warning: null };
-  }, [inventorySnapshots, fills]);
+    const warning = outlierCount > 0
+      ? `⚠️ ${outlierCount} outlier snapshots gekapt naar API-eindstand`
+      : null;
+
+    return { data, warning };
+  }, [inventorySnapshots, fills, groundTruth]);
 
   // Calculate stats from inventory data
   const stats = useMemo(() => {
