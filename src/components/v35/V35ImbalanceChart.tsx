@@ -1,178 +1,161 @@
 import { useMemo } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, ComposedChart, Line, Bar } from 'recharts';
-import { TrendingUp, TrendingDown, AlertTriangle, Activity, DollarSign } from 'lucide-react';
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, ComposedChart, Line } from 'recharts';
+import { Activity, DollarSign, AlertTriangle, TrendingUp, TrendingDown } from 'lucide-react';
 
-interface FillDataPoint {
+interface InventoryDataPoint {
   ts: number;
   time: string;
-  outcome: 'UP' | 'DOWN';
-  side: 'BUY' | 'SELL';
-  price: number;
-  size: number;
   up_shares: number;
   down_shares: number;
-  up_cost: number;
-  down_cost: number;
+  avg_up_cost: number | null;
+  avg_down_cost: number | null;
+  pair_cost: number | null;
+  state: string;
   unpaired: number;
-  up_price?: number;
-  down_price?: number;
 }
 
 interface V35ImbalanceChartProps {
-  fills: Array<{
-    ts: number;
-    side: string;      // BUY or SELL
-    outcome: string;   // UP or DOWN
-    fill_price: number;
-    fill_qty: number;
-  }>;
-  inventorySnapshots?: Array<{
+  inventorySnapshots: Array<{
     ts: number;
     up_shares: number;
     down_shares: number;
+    avg_up_cost?: number | null;
+    avg_down_cost?: number | null;
+    pair_cost?: number | null;
     state: string;
   }>;
   marketSlug: string;
   winner?: 'UP' | 'DOWN';
+  groundTruth?: {
+    api_up_qty: number;
+    api_down_qty: number;
+    total_cost: number;
+    predicted_pnl: number;
+  };
+  // Legacy props for backwards compatibility
+  fills?: Array<{
+    ts: number;
+    side: string;
+    outcome: string;
+    fill_price: number;
+    fill_qty: number;
+  }>;
 }
 
-export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winner }: V35ImbalanceChartProps) {
+export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, groundTruth, fills }: V35ImbalanceChartProps) {
   const chartData = useMemo(() => {
-    if (!fills || fills.length === 0) return [];
-
-    // Sort fills by timestamp
-    const sortedFills = [...fills].sort((a, b) => a.ts - b.ts);
-    
-    let runningUp = 0;
-    let runningDown = 0;
-    let runningUpCost = 0;
-    let runningDownCost = 0;
-
-    const data: FillDataPoint[] = [];
-
-    for (const fill of sortedFills) {
-      // In V35 data, 'side' field contains the OUTCOME (UP/DOWN), not BUY/SELL
-      // The bot only BUYs - it never sells during market window
-      // So 'side' = which outcome was bought
-      const outcome = (fill.outcome?.toUpperCase() || fill.side?.toUpperCase() || 'UP') as 'UP' | 'DOWN';
-      const price = fill.fill_price;
-      const size = fill.fill_qty;
-
-      // All fills are BUYs - add to position
-      if (outcome === 'UP') {
-        runningUp += size;
-        runningUpCost += size * price;
-      } else if (outcome === 'DOWN') {
-        runningDown += size;
-        runningDownCost += size * price;
+    // Use inventory snapshots as the primary data source (reliable position state)
+    if (!inventorySnapshots || inventorySnapshots.length === 0) {
+      // Fallback: if no inventory data but we have fills, show a warning
+      if (fills && fills.length > 0) {
+        return { data: [], warning: 'Geen inventory snapshots - fills data kan onbetrouwbaar zijn' };
       }
-
-      const time = new Date(fill.ts).toLocaleTimeString('nl-NL', { 
-        hour: '2-digit', 
-        minute: '2-digit', 
-        second: '2-digit' 
-      });
-
-      data.push({
-        ts: fill.ts,
-        time,
-        outcome,
-        side: 'BUY', // All fills are buys in V35
-        price,
-        size,
-        up_shares: runningUp,
-        down_shares: runningDown,
-        up_cost: runningUpCost,
-        down_cost: runningDownCost,
-        unpaired: Math.abs(runningUp - runningDown),
-        up_price: outcome === 'UP' ? price : undefined,
-        down_price: outcome === 'DOWN' ? price : undefined,
-      });
+      return { data: [], warning: null };
     }
 
-    return data;
-  }, [fills]);
+    // Sort by timestamp
+    const sortedSnapshots = [...inventorySnapshots].sort((a, b) => a.ts - b.ts);
+    
+    const data: InventoryDataPoint[] = sortedSnapshots.map(snapshot => {
+      const upShares = snapshot.up_shares || 0;
+      const downShares = snapshot.down_shares || 0;
+      
+      return {
+        ts: snapshot.ts,
+        time: new Date(snapshot.ts).toLocaleTimeString('nl-NL', { 
+          hour: '2-digit', 
+          minute: '2-digit', 
+          second: '2-digit' 
+        }),
+        up_shares: upShares,
+        down_shares: downShares,
+        avg_up_cost: snapshot.avg_up_cost,
+        avg_down_cost: snapshot.avg_down_cost,
+        pair_cost: snapshot.pair_cost,
+        state: snapshot.state,
+        unpaired: Math.abs(upShares - downShares),
+      };
+    });
 
-  // Calculate stats
+    return { data, warning: null };
+  }, [inventorySnapshots, fills]);
+
+  // Calculate stats from inventory data
   const stats = useMemo(() => {
-    if (chartData.length === 0) return null;
+    if (chartData.data.length === 0) return null;
     
-    const finalState = chartData[chartData.length - 1];
-    const maxUnpaired = Math.max(...chartData.map(d => d.unpaired));
-    // Filter by outcome (UP/DOWN), not side (BUY/SELL)
-    const upFills = chartData.filter(d => d.outcome === 'UP');
-    const downFills = chartData.filter(d => d.outcome === 'DOWN');
+    const finalState = chartData.data[chartData.data.length - 1];
+    const maxUnpaired = Math.max(...chartData.data.map(d => d.unpaired));
+    const paired = Math.min(finalState.up_shares, finalState.down_shares);
     
-    const totalUpSize = upFills.reduce((sum, f) => sum + f.size, 0);
-    const totalDownSize = downFills.reduce((sum, f) => sum + f.size, 0);
+    // Use ground truth if available (from Polymarket API)
+    const finalUp = groundTruth?.api_up_qty ?? finalState.up_shares;
+    const finalDown = groundTruth?.api_down_qty ?? finalState.down_shares;
+    const totalCost = groundTruth?.total_cost ?? 
+      ((finalState.avg_up_cost || 0) * finalState.up_shares + 
+       (finalState.avg_down_cost || 0) * finalState.down_shares);
     
-    const avgUpPrice = totalUpSize > 0 
-      ? upFills.reduce((sum, f) => sum + f.price * f.size, 0) / totalUpSize
-      : 0;
-    const avgDownPrice = totalDownSize > 0 
-      ? downFills.reduce((sum, f) => sum + f.price * f.size, 0) / totalDownSize
-      : 0;
-    
-    const minUpPrice = upFills.length > 0 ? Math.min(...upFills.map(f => f.price)) : 0;
-    const minDownPrice = downFills.length > 0 ? Math.min(...downFills.map(f => f.price)) : 0;
-    
-    // Total costs from final cumulative state
-    const totalUpCost = finalState.up_cost;
-    const totalDownCost = finalState.down_cost;
-    const totalCost = totalUpCost + totalDownCost;
-    
-    // PnL calculation: (winning_shares × $1.00) - total_cost
-    // Determine winner by which side has more shares (for display purposes)
-    const bias = finalState.up_shares > finalState.down_shares ? 'UP' : 'DOWN';
-    
-    // If we know the winner, calculate actual PnL
-    // PnL = (winning_shares × $1) - (up_cost + down_cost)
-    // The winning shares get $1 each, losing shares are worthless
-    let pnl = 0;
-    let winningShares = 0;
-    if (winner === 'UP') {
-      winningShares = finalState.up_shares;
+    // Calculate PnL
+    let pnl = groundTruth?.predicted_pnl ?? 0;
+    if (!groundTruth && winner) {
+      const winningShares = winner === 'UP' ? finalUp : finalDown;
       pnl = (winningShares * 1.0) - totalCost;
-    } else if (winner === 'DOWN') {
-      winningShares = finalState.down_shares;
-      pnl = (winningShares * 1.0) - totalCost;
-    } else {
-      // Unknown winner - show potential PnL for each scenario
-      const pnlIfUp = (finalState.up_shares * 1.0) - totalCost;
-      const pnlIfDown = (finalState.down_shares * 1.0) - totalCost;
-      pnl = Math.max(pnlIfUp, pnlIfDown); // Best case
     }
+    
+    // CPP from final state or calculate
+    const cpp = finalState.pair_cost ?? 
+      ((finalState.avg_up_cost || 0) + (finalState.avg_down_cost || 0));
+    
+    const bias = finalUp > finalDown ? 'UP' : 'DOWN';
     
     return {
-      finalUp: finalState.up_shares,
-      finalDown: finalState.down_shares,
-      finalUnpaired: finalState.unpaired,
+      finalUp,
+      finalDown,
+      finalUnpaired: Math.abs(finalUp - finalDown),
       maxUnpaired,
-      totalFills: chartData.length,
-      upFillCount: upFills.length,
-      downFillCount: downFills.length,
-      avgUpPrice,
-      avgDownPrice,
-      minUpPrice,
-      minDownPrice,
-      totalUpCost,
-      totalDownCost,
+      paired,
+      totalSnapshots: chartData.data.length,
+      avgUpCost: finalState.avg_up_cost,
+      avgDownCost: finalState.avg_down_cost,
+      cpp,
       totalCost,
       pnl,
       bias,
+      hasGroundTruth: !!groundTruth,
     };
-  }, [chartData, winner]);
+  }, [chartData.data, winner, groundTruth]);
 
-  if (chartData.length === 0) {
+  // State color helper
+  const getStateColor = (state: string) => {
+    switch (state) {
+      case 'CRITICAL': return 'text-destructive';
+      case 'WARNING': return 'text-warning';
+      case 'BALANCED': return 'text-emerald-500';
+      default: return 'text-muted-foreground';
+    }
+  };
+
+  if (chartData.data.length === 0) {
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm">Share Imbalance Timeline</CardTitle>
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Activity className="h-4 w-4" />
+            Position Timeline
+          </CardTitle>
         </CardHeader>
-        <CardContent className="text-muted-foreground text-center py-8">
-          Geen fill data beschikbaar
+        <CardContent className="text-center py-8">
+          <AlertTriangle className="h-8 w-8 mx-auto mb-2 text-warning" />
+          <p className="text-muted-foreground">
+            {chartData.warning || 'Geen inventory snapshots beschikbaar voor deze market'}
+          </p>
+          {fills && fills.length > 0 && (
+            <p className="text-xs text-muted-foreground mt-2">
+              ⚠️ {fills.length} fills gevonden, maar deze data kan onbetrouwbaar zijn
+            </p>
+          )}
         </CardContent>
       </Card>
     );
@@ -183,13 +166,18 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
       <CardHeader className="pb-2">
         <CardTitle className="flex items-center gap-2 text-sm">
           <Activity className="h-4 w-4" />
-          Share Imbalance Evolution
+          Position Timeline (Inventory Snapshots)
         </CardTitle>
         <CardDescription className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-xs">{marketSlug.slice(-35)}</span>
           {winner && (
-            <Badge variant={winner === stats?.bias ? 'destructive' : 'default'} className="text-xs">
+            <Badge variant={winner === stats?.bias ? 'default' : 'destructive'} className="text-xs">
               Winner: {winner}
+            </Badge>
+          )}
+          {stats?.hasGroundTruth && (
+            <Badge variant="outline" className="text-xs bg-emerald-500/10">
+              ✓ API Verified
             </Badge>
           )}
         </CardDescription>
@@ -199,42 +187,46 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
         {stats && (
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
             <div className="bg-muted/50 rounded-lg p-2">
-              <div className="text-muted-foreground">Final UP</div>
+              <div className="text-muted-foreground flex items-center gap-1">
+                <TrendingUp className="h-3 w-3 text-emerald-500" />
+                Final UP
+              </div>
               <div className="font-bold text-emerald-500">{stats.finalUp.toFixed(1)} shares</div>
-              <div className="text-muted-foreground">
-                Cost: ${stats.totalUpCost.toFixed(2)}
-              </div>
-              <div className="text-muted-foreground">
-                Avg: ${stats.avgUpPrice.toFixed(2)}
-              </div>
+              {stats.avgUpCost && (
+                <div className="text-muted-foreground">
+                  Avg: ${stats.avgUpCost.toFixed(3)}
+                </div>
+              )}
             </div>
             <div className="bg-muted/50 rounded-lg p-2">
-              <div className="text-muted-foreground">Final DOWN</div>
+              <div className="text-muted-foreground flex items-center gap-1">
+                <TrendingDown className="h-3 w-3 text-rose-500" />
+                Final DOWN
+              </div>
               <div className="font-bold text-rose-500">{stats.finalDown.toFixed(1)} shares</div>
-              <div className="text-muted-foreground">
-                Cost: ${stats.totalDownCost.toFixed(2)}
-              </div>
-              <div className="text-muted-foreground">
-                Avg: ${stats.avgDownPrice.toFixed(2)}
-              </div>
+              {stats.avgDownCost && (
+                <div className="text-muted-foreground">
+                  Avg: ${stats.avgDownCost.toFixed(3)}
+                </div>
+              )}
             </div>
             <div className="bg-muted/50 rounded-lg p-2">
-              <div className="text-muted-foreground">Total Cost</div>
-              <div className="font-bold">${stats.totalCost.toFixed(2)}</div>
-              <div className="text-muted-foreground">
-                UP: ${stats.totalUpCost.toFixed(2)} + DOWN: ${stats.totalDownCost.toFixed(2)}
+              <div className="text-muted-foreground">Paired / CPP</div>
+              <div className="font-bold">{stats.paired.toFixed(1)} pairs</div>
+              <div className={`text-muted-foreground ${stats.cpp < 1 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                CPP: ${stats.cpp.toFixed(3)}
               </div>
             </div>
             <div className={`rounded-lg p-2 ${stats.pnl >= 0 ? 'bg-emerald-500/10' : 'bg-rose-500/10'}`}>
               <div className="text-muted-foreground flex items-center gap-1">
                 <DollarSign className="h-3 w-3" />
-                P&L {winner ? `(${winner} won)` : '(best case)'}
+                P&L {winner ? `(${winner})` : '(predicted)'}
               </div>
               <div className={`font-bold text-lg ${stats.pnl >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
                 {stats.pnl >= 0 ? '+' : ''}${stats.pnl.toFixed(2)}
               </div>
               <div className="text-muted-foreground text-[10px]">
-                = ({winner || stats.bias} × $1) - ${stats.totalCost.toFixed(2)}
+                Cost: ${stats.totalCost.toFixed(2)}
               </div>
             </div>
             <div className="bg-muted/50 rounded-lg p-2">
@@ -243,7 +235,7 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
                 {stats.finalUnpaired.toFixed(1)} unpaired
               </div>
               <div className="text-muted-foreground">
-                Max: {stats.maxUnpaired.toFixed(1)} | {stats.totalFills} fills
+                Max: {stats.maxUnpaired.toFixed(1)} | {stats.totalSnapshots} pts
               </div>
             </div>
           </div>
@@ -252,13 +244,13 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
         {/* Main chart: UP vs DOWN shares over time */}
         <div className="h-[250px]">
           <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+            <ComposedChart data={chartData.data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
               <defs>
-                <linearGradient id="upGradientImb" x1="0" y1="0" x2="0" y2="1">
+                <linearGradient id="upGradientInv" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
                   <stop offset="95%" stopColor="#10b981" stopOpacity={0.05} />
                 </linearGradient>
-                <linearGradient id="downGradientImb" x1="0" y1="0" x2="0" y2="1">
+                <linearGradient id="downGradientInv" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.4} />
                   <stop offset="95%" stopColor="#f43f5e" stopOpacity={0.05} />
                 </linearGradient>
@@ -279,38 +271,44 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
                 label={{ value: 'Shares', angle: -90, position: 'insideLeft', fontSize: 10 }}
               />
               <YAxis 
-                yAxisId="price"
+                yAxisId="cost"
                 orientation="right"
                 tick={{ fontSize: 10 }} 
                 tickLine={false}
                 axisLine={false}
-                domain={[0, 1]}
+                domain={[0, 1.5]}
                 tickFormatter={(v) => `$${v.toFixed(2)}`}
               />
               <Tooltip 
                 content={({ active, payload }) => {
                   if (!active || !payload?.length) return null;
-                  const data = payload[0].payload as FillDataPoint;
+                  const data = payload[0].payload as InventoryDataPoint;
                   return (
                     <div className="bg-popover border rounded-lg p-3 shadow-lg text-xs">
                       <div className="font-medium mb-1">{data.time}</div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <Badge variant="outline" className={data.outcome === 'UP' ? 'bg-emerald-500/10' : 'bg-rose-500/10'}>
-                          {data.outcome} {data.side}: {data.size.toFixed(1)} @ ${data.price.toFixed(2)}
-                        </Badge>
-                      </div>
-                      <div className="space-y-1 pt-1 border-t">
-                        <div className="flex justify-between">
-                          <span className="text-emerald-500">UP shares:</span>
-                          <span className="font-mono">{data.up_shares.toFixed(1)}</span>
+                      <Badge variant="outline" className={getStateColor(data.state)}>
+                        {data.state}
+                      </Badge>
+                      <div className="space-y-1 pt-2 mt-2 border-t">
+                        <div className="flex justify-between gap-4">
+                          <span className="text-emerald-500">UP:</span>
+                          <span className="font-mono">{data.up_shares.toFixed(1)} @ ${(data.avg_up_cost || 0).toFixed(3)}</span>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-rose-500">DOWN shares:</span>
-                          <span className="font-mono">{data.down_shares.toFixed(1)}</span>
+                        <div className="flex justify-between gap-4">
+                          <span className="text-rose-500">DOWN:</span>
+                          <span className="font-mono">{data.down_shares.toFixed(1)} @ ${(data.avg_down_cost || 0).toFixed(3)}</span>
                         </div>
-                        <div className="flex justify-between pt-1 border-t">
+                        {data.pair_cost !== null && (
+                          <div className="flex justify-between gap-4 pt-1 border-t">
+                            <span>CPP:</span>
+                            <span className={`font-mono font-bold ${data.pair_cost < 1 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                              ${data.pair_cost.toFixed(3)}
+                            </span>
+                          </div>
+                        )}
+                        <div className="flex justify-between gap-4">
                           <span className="text-warning">Unpaired:</span>
-                          <span className={`font-mono font-bold ${data.unpaired >= 100 ? 'text-destructive' : ''}`}>
+                          <span className={`font-mono ${data.unpaired >= 100 ? 'text-destructive font-bold' : ''}`}>
                             {data.unpaired.toFixed(1)}
                           </span>
                         </div>
@@ -319,16 +317,13 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
                   );
                 }}
               />
-              {/* Reference lines for imbalance thresholds */}
-              <ReferenceLine yAxisId="shares" y={100} stroke="#ef4444" strokeDasharray="3 3" />
-              <ReferenceLine yAxisId="shares" y={50} stroke="#f59e0b" strokeDasharray="3 3" />
               
               <Area 
                 yAxisId="shares"
                 type="stepAfter" 
                 dataKey="up_shares" 
                 stroke="#10b981" 
-                fill="url(#upGradientImb)" 
+                fill="url(#upGradientInv)" 
                 strokeWidth={2}
                 name="UP Shares"
               />
@@ -337,31 +332,23 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
                 type="stepAfter" 
                 dataKey="down_shares" 
                 stroke="#f43f5e" 
-                fill="url(#downGradientImb)" 
+                fill="url(#downGradientInv)" 
                 strokeWidth={2}
                 name="DOWN Shares"
               />
-              {/* Price scatter for each fill */}
+              {/* CPP line */}
               <Line
-                yAxisId="price"
-                type="monotone"
-                dataKey="up_price"
-                stroke="#10b981"
-                strokeWidth={0}
-                dot={{ r: 3, fill: '#10b981' }}
-                connectNulls={false}
-                name="UP Price"
+                yAxisId="cost"
+                type="stepAfter"
+                dataKey="pair_cost"
+                stroke="#8b5cf6"
+                strokeWidth={2}
+                dot={false}
+                name="CPP"
+                connectNulls
               />
-              <Line
-                yAxisId="price"
-                type="monotone"
-                dataKey="down_price"
-                stroke="#f43f5e"
-                strokeWidth={0}
-                dot={{ r: 3, fill: '#f43f5e' }}
-                connectNulls={false}
-                name="DOWN Price"
-              />
+              {/* Reference line for CPP = 1.00 (breakeven) */}
+              <ReferenceLine yAxisId="cost" y={1} stroke="#8b5cf6" strokeDasharray="3 3" />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
@@ -369,9 +356,9 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
         {/* Unpaired/Imbalance chart */}
         <div className="h-[120px]">
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+            <AreaChart data={chartData.data} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
               <defs>
-                <linearGradient id="unpairedGradient" x1="0" y1="0" x2="0" y2="1">
+                <linearGradient id="unpairedGradientInv" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.5} />
                   <stop offset="95%" stopColor="#f59e0b" stopOpacity={0.05} />
                 </linearGradient>
@@ -399,7 +386,7 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
                 type="stepAfter" 
                 dataKey="unpaired" 
                 stroke="#f59e0b" 
-                fill="url(#unpairedGradient)" 
+                fill="url(#unpairedGradientInv)" 
                 strokeWidth={2}
                 name="Unpaired"
               />
@@ -411,19 +398,23 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
         <div className="flex flex-wrap gap-4 text-xs justify-center pt-2 border-t">
           <div className="flex items-center gap-1">
             <div className="w-3 h-3 rounded-full bg-emerald-500" />
-            <span>UP shares/prices</span>
+            <span>UP shares</span>
           </div>
           <div className="flex items-center gap-1">
             <div className="w-3 h-3 rounded-full bg-rose-500" />
-            <span>DOWN shares/prices</span>
+            <span>DOWN shares</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded-full bg-violet-500" />
+            <span>CPP (cost per pair)</span>
           </div>
           <div className="flex items-center gap-1">
             <div className="w-3 h-3 rounded-full bg-warning" />
-            <span>Unpaired/Imbalance</span>
+            <span>Imbalance</span>
           </div>
           <div className="flex items-center gap-1">
-            <div className="w-4 h-0 border-t-2 border-dashed border-destructive" />
-            <span>Critical threshold</span>
+            <div className="w-4 h-0 border-t-2 border-dashed border-violet-500" />
+            <span>CPP = $1.00</span>
           </div>
         </div>
       </CardContent>
