@@ -11,7 +11,7 @@ import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { V35LogViewer, V35FillsTable, V35ExportButton, V35StrategyPDFExport, V35OpenPositions, V35LivePriceHeader, V35DecisionLog, V35ExpirySnapshots, V35MarketPnLTable } from '@/components/v35';
+import { V35LogViewer, V35FillsTable, V35ExportButton, V35StrategyPDFExport, V35OpenPositions, V35LivePriceHeader, V35DecisionLog, V35ExpirySnapshots, V35MarketPnLTable, V35PairLog } from '@/components/v35';
 import { toast } from 'sonner';
 import { 
   Activity, 
@@ -29,7 +29,8 @@ import {
   Power,
   AlertTriangle,
   Brain,
-  ChevronDown
+  ChevronDown,
+  Layers
 } from 'lucide-react';
 
 interface RunnerHeartbeat {
@@ -66,6 +67,7 @@ interface V35Settlement {
 }
 
 const TAB_OPTIONS = [
+  { value: 'pairs', label: 'Pairs', icon: Layers },
   { value: 'pnl', label: 'P&L', icon: DollarSign },
   { value: 'decisions', label: 'Decisions', icon: Brain },
   { value: 'positions', label: 'Positions', icon: Scale },
@@ -78,7 +80,7 @@ const TAB_OPTIONS = [
 export default function V35Dashboard() {
   const [isOnline, setIsOnline] = useState(false);
   const [lastSeen, setLastSeen] = useState<Date | null>(null);
-  const [activeTab, setActiveTab] = useState('pnl');
+  const [activeTab, setActiveTab] = useState('pairs');
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
 
@@ -388,6 +390,10 @@ export default function V35Dashboard() {
               })}
             </TabsList>
           )}
+
+          <TabsContent value="pairs">
+            <V35PairLog />
+          </TabsContent>
 
           <TabsContent value="pnl">
             <V35MarketPnLTable />

@@ -9,3 +9,4 @@ export { V35FillTimeline } from './V35FillTimeline';
 export { V35ExpirySnapshots } from './V35ExpirySnapshots';
 export { V35MarketPnLTable } from './V35MarketPnLTable';
 export { V35ImbalanceChart } from './V35ImbalanceChart';
+export { V35PairLog } from './V35PairLog';
