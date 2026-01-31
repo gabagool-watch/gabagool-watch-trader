@@ -58,9 +58,20 @@ export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, grou
     // Sort by timestamp
     const sortedSnapshots = [...inventorySnapshots].sort((a, b) => a.ts - b.ts);
     
+    // Track running maximum to ensure monotonic increase
+    // The bot only buys, so shares should never decrease
+    // Decreases in inventory_snapshots are from API reconciliation, not actual sells
+    let runningMaxUp = 0;
+    let runningMaxDown = 0;
+    
     const data: InventoryDataPoint[] = sortedSnapshots.map(snapshot => {
-      const upShares = snapshot.up_shares || 0;
-      const downShares = snapshot.down_shares || 0;
+      const rawUp = snapshot.up_shares || 0;
+      const rawDown = snapshot.down_shares || 0;
+      
+      // Use running maximum to ensure monotonic increase
+      // This filters out API reconciliation dips
+      runningMaxUp = Math.max(runningMaxUp, rawUp);
+      runningMaxDown = Math.max(runningMaxDown, rawDown);
       
       return {
         ts: snapshot.ts,
@@ -69,13 +80,13 @@ export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, grou
           minute: '2-digit', 
           second: '2-digit' 
         }),
-        up_shares: upShares,
-        down_shares: downShares,
+        up_shares: runningMaxUp,
+        down_shares: runningMaxDown,
         avg_up_cost: snapshot.avg_up_cost,
         avg_down_cost: snapshot.avg_down_cost,
         pair_cost: snapshot.pair_cost,
         state: snapshot.state,
-        unpaired: Math.abs(upShares - downShares),
+        unpaired: Math.abs(runningMaxUp - runningMaxDown),
       };
     });
 
