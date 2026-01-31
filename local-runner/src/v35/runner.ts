@@ -801,6 +801,40 @@ async function processMarket(market: V35Market): Promise<void> {
   queueOrderbookSnapshot(market);
   
   // =========================================================================
+  // V36.3.7: LOG INVENTORY SNAPSHOT EVERY TICK
+  // =========================================================================
+  // Log inventory snapshot on every tick (not just after fills) so the dashboard
+  // can show real-time position accumulation and bot decision-making.
+  // =========================================================================
+  const unpaired = Math.abs(market.upQty - market.downQty);
+  const paired = Math.min(market.upQty, market.downQty);
+  const avgUp = market.upQty > 0 ? market.upCost / market.upQty : 0;
+  const avgDown = market.downQty > 0 ? market.downCost / market.downQty : 0;
+  const cpp = (market.upQty > 0 && market.downQty > 0) ? avgUp + avgDown : 0;
+  
+  let inventoryState = 'FLAT';
+  if (paired > 0 && unpaired < 5) inventoryState = 'PAIRED';
+  else if (paired > 0 && unpaired >= 5) inventoryState = 'IMBALANCED';
+  else if (unpaired >= 20) inventoryState = 'WARNING';
+  else if (unpaired >= 50) inventoryState = 'CRITICAL';
+  
+  const tickSnapshot: V35InventorySnapshot = {
+    marketSlug: market.slug,
+    asset: market.asset,
+    upShares: market.upQty,
+    downShares: market.downQty,
+    avgUpCost: avgUp,
+    avgDownCost: avgDown,
+    combinedCost: cpp,
+    state: inventoryState,
+    triggerType: 'TICK',
+  };
+  
+  saveV35InventorySnapshot(tickSnapshot).catch(err => {
+    // Silent fail - we log many ticks, don't spam errors
+  });
+  
+  // =========================================================================
   // V36.1: REVERSAL DETECTOR - CHECK FOR BINANCE REVERSALS
   // =========================================================================
   // This runs on every market tick and checks if Binance is signaling a reversal.
