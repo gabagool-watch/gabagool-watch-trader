@@ -86,6 +86,8 @@ import {
 } from '../position-cache.js';
 // Auto-claim redeemer for winning positions
 import { startAutoClaimLoop, stopAutoClaimLoop } from '../redeemer.js';
+// CRITICAL V36.4.0: Exposure ledger for hard caps
+import { syncPosition as syncPositionToLedger, clearMarket as clearLedgerMarket, getEffectiveExposure } from '../exposure-ledger.js';
 
 // ============================================================
 // CONSTANTS
@@ -514,6 +516,11 @@ async function refreshMarkets(): Promise<void> {
       market.upCost = existingPos.upCost;
       market.downCost = existingPos.downCost;
       log(`📊 Synced existing position for ${m.slug}: UP=${existingPos.upShares.toFixed(1)} DOWN=${existingPos.downShares.toFixed(1)}`);
+      
+      // CRITICAL V36.4.0: SYNC EXPOSURE LEDGER!
+      // Without this, the 100-share caps are completely ignored because the ledger thinks position is 0/0
+      syncPositionToLedger(m.conditionId, m.asset as V35Asset, existingPos.upShares, existingPos.downShares);
+      log(`🔒 Synced exposure ledger: UP=${existingPos.upShares.toFixed(1)} DOWN=${existingPos.downShares.toFixed(1)}`);
     }
     
     markets.set(m.slug, market);
@@ -605,6 +612,10 @@ function cleanupExpiredMarkets(): void {
       // CRITICAL: Unregister from position cache
       unregisterMarketFromCache(market.conditionId, market.upTokenId, market.downTokenId);
       
+      // CRITICAL V36.4.0: Clear exposure ledger for this market
+      // Without this, stale data persists and affects future cap checks
+      clearLedgerMarket(market.conditionId, market.asset);
+      
       // V35.7.0: Cancel any pending expiry snapshot (though it should have fired already)
       cancelExpirySnapshot(slug);
       
@@ -692,6 +703,11 @@ async function processMarket(market: V35Market): Promise<void> {
       market.downQty = apiDown;
       market.downCost = cachedPos.downCost;
     }
+    
+    // CRITICAL V36.4.0: SYNC EXPOSURE LEDGER EVERY CYCLE!
+    // Without this, the 100-share caps are ignored because ledger drifts from reality
+    // This ensures caps are enforced based on ACTUAL Polymarket positions, not stale local state
+    syncPositionToLedger(market.conditionId, market.asset, apiUp, apiDown);
   } else {
     // V35.8.1: Log when cache is not available
     log(`⚠️ No cached position for ${market.slug.slice(-25)} - using local state`);

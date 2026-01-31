@@ -128,6 +128,33 @@ export class QuotingEngine {
     const imbalance = Math.abs(market.upQty - market.downQty);
     
     // =========================================================================
+    // V36.4.0: ABSOLUTE EMERGENCY HALT - EXISTING POSITION OVER CAP
+    // =========================================================================
+    // If we ALREADY have more shares than the cap allows, HALT immediately.
+    // This should never happen, but is a critical safety net.
+    // =========================================================================
+    const upSharesAlready = market.upQty;
+    const downSharesAlready = market.downQty;
+    
+    if (upSharesAlready > HARD_CAP_PER_SIDE || downSharesAlready > HARD_CAP_PER_SIDE) {
+      const reason = `🚨 EMERGENCY HALT: Position already exceeds cap! UP=${upSharesAlready.toFixed(0)} DOWN=${downSharesAlready.toFixed(0)} (max=${HARD_CAP_PER_SIDE})`;
+      console.log(`[QuotingEngine] ${reason}`);
+      
+      logV35GuardEvent({
+        marketSlug: market.slug,
+        asset: market.asset,
+        guardType: 'EMERGENCY_HALT_OVERCAP',
+        blockedSide: side,
+        upQty: market.upQty,
+        downQty: market.downQty,
+        expensiveSide,
+        reason,
+      }).catch(() => {});
+      
+      return { quotes: [], blocked: true, blockReason: reason };
+    }
+    
+    // =========================================================================
     // V35.12.0: DIRECTIONAL BIAS - DETECT WINNER VS LOSER
     // =========================================================================
     const sidePrice = side === 'UP' ? upLivePrice : downLivePrice;
@@ -182,17 +209,34 @@ export class QuotingEngine {
     }
     
     // =========================================================================
-    // V35.11.4: HARD 100-SHARE CAP CHECK
+    // V36.4.0: HARD 100-SHARE CAP CHECK - DUAL VERIFICATION
     // =========================================================================
+    // Check BOTH the exposure ledger AND the actual market inventory.
+    // This double-check prevents catastrophic breaches when ledger drifts from reality.
+    // =========================================================================
+    
+    // Check 1: Exposure ledger (includes pending/open orders)
     const ledgerSide: LedgerSide = side === 'UP' ? 'UP' : 'DOWN';
     const exposure = getEffectiveExposure(market.conditionId, market.asset);
-    const effectiveShares = side === 'UP' ? exposure.effectiveUp : exposure.effectiveDown;
+    const ledgerEffective = side === 'UP' ? exposure.effectiveUp : exposure.effectiveDown;
+    
+    // Check 2: ACTUAL market inventory (ground truth from Polymarket sync)
+    const actualShares = side === 'UP' ? market.upQty : market.downQty;
+    
+    // Use the HIGHER of the two as effective shares (most conservative)
+    const effectiveShares = Math.max(ledgerEffective, actualShares);
     const remainingCap = HARD_CAP_PER_SIDE - effectiveShares;
     
-    console.log(`[QuotingEngine] 🔒 HARD-CAP CHECK: ${side} effective=${effectiveShares.toFixed(0)}/${HARD_CAP_PER_SIDE} remaining=${remainingCap.toFixed(0)}`);
+    // V36.4.0: EMERGENCY LOGGING when there's a large discrepancy
+    const discrepancy = Math.abs(ledgerEffective - actualShares);
+    if (discrepancy > 10) {
+      console.log(`🚨 [QuotingEngine] LEDGER DRIFT DETECTED: ledger=${ledgerEffective.toFixed(0)} actual=${actualShares.toFixed(0)} discrepancy=${discrepancy.toFixed(0)}`);
+    }
+    
+    console.log(`[QuotingEngine] 🔒 HARD-CAP CHECK: ${side} ledger=${ledgerEffective.toFixed(0)} actual=${actualShares.toFixed(0)} effective=${effectiveShares.toFixed(0)}/${HARD_CAP_PER_SIDE} remaining=${remainingCap.toFixed(0)}`);
     
     if (remainingCap <= 0) {
-      const reason = `HARD-CAP: ${side} at ${effectiveShares.toFixed(0)}/${HARD_CAP_PER_SIDE} shares - NO MORE ORDERS`;
+      const reason = `HARD-CAP: ${side} at ${effectiveShares.toFixed(0)}/${HARD_CAP_PER_SIDE} shares (ledger=${ledgerEffective.toFixed(0)} actual=${actualShares.toFixed(0)}) - NO MORE ORDERS`;
       console.log(`[QuotingEngine] 🚫 ${reason}`);
       
       logV35GuardEvent({
