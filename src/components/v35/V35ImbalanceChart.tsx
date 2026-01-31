@@ -13,6 +13,8 @@ interface FillDataPoint {
   size: number;
   up_shares: number;
   down_shares: number;
+  up_cost: number;
+  down_cost: number;
   unpaired: number;
   up_price?: number;
   down_price?: number;
@@ -82,6 +84,8 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
         size,
         up_shares: runningUp,
         down_shares: runningDown,
+        up_cost: runningUpCost,
+        down_cost: runningDownCost,
         unpaired: Math.abs(runningUp - runningDown),
         up_price: outcome === 'UP' ? price : undefined,
         down_price: outcome === 'DOWN' ? price : undefined,
@@ -114,6 +118,33 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
     const minUpPrice = upFills.length > 0 ? Math.min(...upFills.map(f => f.price)) : 0;
     const minDownPrice = downFills.length > 0 ? Math.min(...downFills.map(f => f.price)) : 0;
     
+    // Total costs from final cumulative state
+    const totalUpCost = finalState.up_cost;
+    const totalDownCost = finalState.down_cost;
+    const totalCost = totalUpCost + totalDownCost;
+    
+    // PnL calculation: (winning_shares × $1.00) - total_cost
+    // Determine winner by which side has more shares (for display purposes)
+    const bias = finalState.up_shares > finalState.down_shares ? 'UP' : 'DOWN';
+    
+    // If we know the winner, calculate actual PnL
+    // PnL = (winning_shares × $1) - (up_cost + down_cost)
+    // The winning shares get $1 each, losing shares are worthless
+    let pnl = 0;
+    let winningShares = 0;
+    if (winner === 'UP') {
+      winningShares = finalState.up_shares;
+      pnl = (winningShares * 1.0) - totalCost;
+    } else if (winner === 'DOWN') {
+      winningShares = finalState.down_shares;
+      pnl = (winningShares * 1.0) - totalCost;
+    } else {
+      // Unknown winner - show potential PnL for each scenario
+      const pnlIfUp = (finalState.up_shares * 1.0) - totalCost;
+      const pnlIfDown = (finalState.down_shares * 1.0) - totalCost;
+      pnl = Math.max(pnlIfUp, pnlIfDown); // Best case
+    }
+    
     return {
       finalUp: finalState.up_shares,
       finalDown: finalState.down_shares,
@@ -126,9 +157,13 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
       avgDownPrice,
       minUpPrice,
       minDownPrice,
-      bias: finalState.up_shares > finalState.down_shares ? 'UP' : 'DOWN',
+      totalUpCost,
+      totalDownCost,
+      totalCost,
+      pnl,
+      bias,
     };
-  }, [chartData]);
+  }, [chartData, winner]);
 
   if (chartData.length === 0) {
     return (
@@ -162,35 +197,53 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
       <CardContent className="space-y-4">
         {/* Stats row */}
         {stats && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
             <div className="bg-muted/50 rounded-lg p-2">
               <div className="text-muted-foreground">Final UP</div>
-              <div className="font-bold text-emerald-500">{stats.finalUp.toFixed(1)}</div>
+              <div className="font-bold text-emerald-500">{stats.finalUp.toFixed(1)} shares</div>
               <div className="text-muted-foreground">
-                Avg: ${stats.avgUpPrice.toFixed(2)} | Min: ${stats.minUpPrice.toFixed(2)}
+                Cost: ${stats.totalUpCost.toFixed(2)}
+              </div>
+              <div className="text-muted-foreground">
+                Avg: ${stats.avgUpPrice.toFixed(2)}
               </div>
             </div>
             <div className="bg-muted/50 rounded-lg p-2">
               <div className="text-muted-foreground">Final DOWN</div>
-              <div className="font-bold text-rose-500">{stats.finalDown.toFixed(1)}</div>
+              <div className="font-bold text-rose-500">{stats.finalDown.toFixed(1)} shares</div>
               <div className="text-muted-foreground">
-                Avg: ${stats.avgDownPrice.toFixed(2)} | Min: ${stats.minDownPrice.toFixed(2)}
+                Cost: ${stats.totalDownCost.toFixed(2)}
+              </div>
+              <div className="text-muted-foreground">
+                Avg: ${stats.avgDownPrice.toFixed(2)}
               </div>
             </div>
             <div className="bg-muted/50 rounded-lg p-2">
-              <div className="text-muted-foreground">Max Imbalance</div>
+              <div className="text-muted-foreground">Total Cost</div>
+              <div className="font-bold">${stats.totalCost.toFixed(2)}</div>
+              <div className="text-muted-foreground">
+                UP: ${stats.totalUpCost.toFixed(2)} + DOWN: ${stats.totalDownCost.toFixed(2)}
+              </div>
+            </div>
+            <div className={`rounded-lg p-2 ${stats.pnl >= 0 ? 'bg-emerald-500/10' : 'bg-rose-500/10'}`}>
+              <div className="text-muted-foreground flex items-center gap-1">
+                <DollarSign className="h-3 w-3" />
+                P&L {winner ? `(${winner} won)` : '(best case)'}
+              </div>
+              <div className={`font-bold text-lg ${stats.pnl >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                {stats.pnl >= 0 ? '+' : ''}${stats.pnl.toFixed(2)}
+              </div>
+              <div className="text-muted-foreground text-[10px]">
+                = ({winner || stats.bias} × $1) - ${stats.totalCost.toFixed(2)}
+              </div>
+            </div>
+            <div className="bg-muted/50 rounded-lg p-2">
+              <div className="text-muted-foreground">Imbalance</div>
               <div className={`font-bold ${stats.maxUnpaired >= 100 ? 'text-destructive' : stats.maxUnpaired >= 50 ? 'text-warning' : ''}`}>
-                {stats.maxUnpaired.toFixed(1)}
+                {stats.finalUnpaired.toFixed(1)} unpaired
               </div>
               <div className="text-muted-foreground">
-                Bias: {stats.bias}
-              </div>
-            </div>
-            <div className="bg-muted/50 rounded-lg p-2">
-              <div className="text-muted-foreground">Fill Count</div>
-              <div className="font-bold">{stats.totalFills}</div>
-              <div className="text-muted-foreground">
-                {stats.upFillCount} UP / {stats.downFillCount} DOWN
+                Max: {stats.maxUnpaired.toFixed(1)} | {stats.totalFills} fills
               </div>
             </div>
           </div>
