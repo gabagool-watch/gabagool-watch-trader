@@ -287,7 +287,7 @@ export async function logV35GuardEvent(event: V35GuardEvent): Promise<boolean> {
 
 export interface V35PairEvent {
   pairId: string;
-  eventType: 'pair_opened' | 'pair_taker_filled' | 'pair_maker_placed' | 'pair_maker_filled' | 'pair_hedged' | 'pair_emergency' | 'pair_expired';
+  eventType: 'pair_opened' | 'pair_taker_filled' | 'pair_maker_placed' | 'pair_maker_filled' | 'pair_hedged' | 'pair_emergency' | 'pair_expired' | 'pair_blocked';
   marketSlug: string;
   asset: string;
   takerSide: 'UP' | 'DOWN';
