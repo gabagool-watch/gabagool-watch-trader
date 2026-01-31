@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useChainlinkRealtime } from '@/hooks/useChainlinkRealtime';
 import { useStrikePrices } from '@/hooks/useStrikePrices';
+import { useIsMobile } from '@/hooks/use-mobile';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { supabase } from '@/integrations/supabase/client';
@@ -61,6 +62,7 @@ export function V35LivePriceHeader() {
   const { btcPrice, isConnected, updateCount, lastUpdate } = useChainlinkRealtime(true);
   const { strikePrices, isLoading: strikesLoading } = useStrikePrices();
   const [tick, setTick] = useState(0);
+  const isMobile = useIsMobile();
   
   // Fetch live positions for share imbalance
   const { data: positionData } = useQuery<PositionSummary>({
@@ -99,6 +101,91 @@ export function V35LivePriceHeader() {
   const delta = btcPrice && strikePrice ? btcPrice - strikePrice : null;
   const deltaPct = delta && strikePrice ? (delta / strikePrice) * 100 : null;
   
+  // Mobile layout
+  if (isMobile) {
+    return (
+      <Card className="border-primary/20 bg-gradient-to-r from-primary/5 via-background to-primary/5">
+        <CardContent className="py-3 px-3">
+          {/* Row 1: Connection + BTC Price */}
+          <div className="flex items-center justify-between gap-2 mb-3">
+            {isConnected ? (
+              <Badge variant="outline" className="bg-emerald-500/10 text-emerald-500 border-emerald-500/30 text-xs px-2 py-0.5">
+                <Wifi className="h-3 w-3 mr-1" />
+                Live
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="bg-destructive/10 text-destructive border-destructive/30 text-xs">
+                <WifiOff className="h-3 w-3 mr-1" />
+                ...
+              </Badge>
+            )}
+            <div className={`text-xl font-bold font-mono tabular-nums ${!isStale ? '' : 'text-muted-foreground'}`}>
+              {btcPrice ? `$${btcPrice.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` : '---'}
+            </div>
+          </div>
+          
+          {/* Row 2: Strike + Delta + Predicted */}
+          {strikePrice && (
+            <div className="grid grid-cols-3 gap-2 text-center mb-3">
+              <div>
+                <div className="text-[10px] text-muted-foreground">Strike</div>
+                <div className="text-sm font-bold font-mono text-primary">
+                  ${strikePrice.toLocaleString('en-US', { minimumFractionDigits: 0 })}
+                </div>
+              </div>
+              {delta !== null && (
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Delta</div>
+                  <div className={`text-sm font-bold font-mono flex items-center justify-center gap-0.5 ${
+                    delta >= 0 ? 'text-emerald-500' : 'text-rose-500'
+                  }`}>
+                    {delta >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                    {delta >= 0 ? '+' : ''}{delta.toFixed(0)}
+                  </div>
+                </div>
+              )}
+              {delta !== null && (
+                <div>
+                  <div className="text-[10px] text-muted-foreground">Predicted</div>
+                  <Badge 
+                    className={`text-xs px-2 py-0 ${
+                      delta >= 0 
+                        ? 'bg-emerald-500/90 text-white' 
+                        : 'bg-rose-500/90 text-white'
+                    }`}
+                  >
+                    {delta >= 0 ? 'UP' : 'DOWN'}
+                  </Badge>
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* Row 3: Shares if present */}
+          {positionData && (positionData.upQty > 0 || positionData.downQty > 0) && (
+            <div className="flex items-center justify-center gap-3 text-xs border-t border-border/30 pt-2">
+              <span className="text-emerald-500 font-mono flex items-center gap-0.5">
+                <ArrowUp className="h-3 w-3" />
+                {positionData.upQty.toFixed(0)}
+              </span>
+              <span className="text-muted-foreground">/</span>
+              <span className="text-rose-500 font-mono flex items-center gap-0.5">
+                <ArrowDown className="h-3 w-3" />
+                {positionData.downQty.toFixed(0)}
+              </span>
+              {positionData.trailingSide && positionData.imbalance >= 5 && (
+                <span className={`${positionData.imbalance >= 15 ? 'text-destructive' : 'text-muted-foreground'}`}>
+                  ({positionData.trailingSide} -{positionData.imbalance.toFixed(0)})
+                </span>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Desktop layout (original)
   return (
     <Card className="border-primary/20 bg-gradient-to-r from-primary/5 via-background to-primary/5">
       <CardContent className="py-4">
@@ -182,7 +269,7 @@ export function V35LivePriceHeader() {
               </div>
             )}
             
-            {/* Share Imbalance - NEW */}
+            {/* Share Imbalance */}
             {positionData && (positionData.upQty > 0 || positionData.downQty > 0) && (
               <div className="text-center border-l border-border/50 pl-6">
                 <div className="text-xs text-muted-foreground mb-0.5 flex items-center gap-1">
