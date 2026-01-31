@@ -368,30 +368,10 @@ export class PairTracker {
       return { success: false, error: 'maker_price_below_minimum' };
     }
     
-    // V36.3.8: Check if maker can realistically fill
-    const MAKER_FILL_BUFFER = 0.03; // Allow 3¢ buffer for spread movement
-    if (cheapAsk > projectedMakerPrice + MAKER_FILL_BUFFER) {
-      const gap = cheapAsk - projectedMakerPrice;
-      console.log(`[PairTracker] 🔴 BLOCKED: Maker unlikely to fill`);
-      console.log(`[PairTracker]    Maker bid: $${projectedMakerPrice.toFixed(3)} | Cheap ask: $${cheapAsk.toFixed(3)} | Gap: ${(gap * 100).toFixed(1)}¢`);
-      logPairEvent({
-        pairId: `blocked_${Date.now()}`,
-        eventType: 'pair_blocked',
-        marketSlug: market.slug,
-        asset: market.asset,
-        takerSide: expensiveSide,
-        takerPrice: expensiveAsk,
-        takerSize: size,
-        makerSide: cheapSide,
-        makerPrice: projectedMakerPrice,
-        makerSize: size,
-        cpp: cheapAsk, // Store cheap ask in cpp field for debugging
-        status: 'maker_unlikely_to_fill',
-      });
-      return { success: false, error: 'maker_unlikely_to_fill' };
-    }
-    
-    console.log(`[PairTracker] ✓ V36.3.8 Maker viable: bid $${projectedMakerPrice.toFixed(3)} vs ask $${cheapAsk.toFixed(3)}`)
+    // V36.4.1: Removed "maker viability check" - we place a LIMIT order
+    // on the cheap side, so we don't care about the current ask price.
+    // We provide liquidity, we don't take it!
+    console.log(`[PairTracker] ✓ Maker will be placed at $${projectedMakerPrice.toFixed(3)} (limit order)`)
     
     // Create pair ID
     const pairId = `pair_${Date.now()}_${++this.pairCounter}`;
