@@ -21,8 +21,8 @@
 // This ensures imbalances are FIXED, not abandoned via bans.
 // ============================================================
 
-export const V35_VERSION = 'V36.2.0';
-export const V35_CODENAME = 'Pair-Based Market Making - Always Enter';
+export const V35_VERSION = 'V36.4.3';
+export const V35_CODENAME = 'Fill Audit Fallback - Zero Data Loss';
 
 export type V35Mode = 'test' | 'moderate' | 'production';
 

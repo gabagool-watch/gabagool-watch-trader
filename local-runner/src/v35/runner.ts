@@ -1,14 +1,18 @@
 // ============================================================
 // V36 RUNNER - PAIR-BASED MARKET MAKING
 // ============================================================
-// Version: V36.3.6 - "Market Expiry Reset"
+// Version: V36.4.3 - "Fill Audit Fallback"
+//
+// V36.4.3 KEY CHANGES:
+// - Early Whitelisting: orderId registered BEFORE verification delay
+// - Fill Audit Fallback: Poll API for fills if WebSocket misses them
+// - Guarantees ALL fills are logged to database, zero data loss
 //
 // V36.3.6 KEY CHANGES:
 // - FIX: Reset pairs when market expires to prevent stale pairs blocking new trades
 // - Pairs for expired markets are marked EXPIRED and deleted
 // - Market start times are cleared to allow proper startup delay for new markets
 //
-// ============================================================
 // V36 STRATEGY SUMMARY (Taker-Maker Pair Trading)
 // ============================================================
 // 1. TAKER on expensive side: 10 shares market order
@@ -854,9 +858,13 @@ async function processMarket(market: V35Market): Promise<void> {
   
   // =========================================================================
   // V36.1: PAIR TRACKER - CHECK TIMEOUTS
+  // V36.4.3: FILL AUDIT FALLBACK - Poll API for missed WebSocket fills
   // =========================================================================
   const pairTracker = getPairTracker();
   await pairTracker.checkTimeouts(market);
+  
+  // V36.4.3: Audit WAITING_HEDGE pairs for missed fills every tick
+  await pairTracker.auditMakerFills(market);
   
   // Log pair tracker stats periodically
   const pairStats = pairTracker.getStats();
