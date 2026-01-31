@@ -1,13 +1,13 @@
 // ============================================================
 // V36 PAIR TRACKER - INDEPENDENT PAIR LIFECYCLE MANAGEMENT
 // ============================================================
-// Version: V36.5.2 - "FIFO Hedge Aggregation"
+// Version: V36.5.3 - "Maker Inventory Pre-Hedging"
 //
-// V36.5.2 CRITICAL ENHANCEMENT:
-// - Maker orders can now hedge MULTIPLE takers with one order
-// - When scaling up for $1 minimum, older unhedged takers are included
-// - Fill allocation uses FIFO (oldest takers hedged first)
-// - Example: 2x 10-share takers hedged by 1x 20-share maker
+// V36.5.3 CAPITAL EFFICIENCY:
+// - Surplus maker shares (from $1 minimum scaling) go to "inventory"
+// - New takers check inventory first → instant pre-hedge, no new order
+// - Example: 50 DOWN filled for 20 UP taker → 30 surplus to inventory
+//            Next 15 UP taker → consumed from inventory, instantly hedged!
 // - Prevents wasteful "extra" maker shares that don't hedge anything
 //
 // V36.5.1 CRITICAL FIX:
@@ -127,6 +127,29 @@ const DEFAULT_CONFIG: PairTrackerConfig = {
 };
 
 // ============================================================
+// V36.5.3: MAKER INVENTORY - Pre-hedge surplus shares
+// ============================================================
+// When maker orders are scaled up for $1 minimum, surplus shares
+// become "inventory" that can pre-hedge future takers:
+//
+// Example:
+//   Taker A: 20 UP @ $0.90
+//   Maker:   50 DOWN @ $0.02 (scaled, 30 surplus)
+//   → Inventory: { DOWN: 30 }
+//
+//   Taker B: 15 UP @ $0.91 (later)
+//   → Check inventory: 30 DOWN available!
+//   → Consume 15 from inventory, no new maker needed
+//   → Inventory: { DOWN: 15 }
+// ============================================================
+
+interface MakerInventory {
+  UP: number;
+  DOWN: number;
+  avgPrice: { UP: number; DOWN: number };  // Track avg cost for P&L
+}
+
+// ============================================================
 // PAIR TRACKER CLASS
 // ============================================================
 
@@ -137,8 +160,83 @@ export class PairTracker {
   private marketStartTimes: Map<string, number> = new Map();
   private lastPairOpenedAt: number = 0;  // V36.3.1: Track last pair open time
   
+  // V36.5.3: Maker inventory per market - surplus shares for future hedges
+  private makerInventory: Map<string, MakerInventory> = new Map();
+  
   constructor(config: Partial<PairTrackerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+  
+  // ============================================================
+  // V36.5.3: MAKER INVENTORY MANAGEMENT
+  // ============================================================
+  
+  /**
+   * Get or create inventory for a market
+   */
+  private getInventory(marketSlug: string): MakerInventory {
+    let inv = this.makerInventory.get(marketSlug);
+    if (!inv) {
+      inv = { UP: 0, DOWN: 0, avgPrice: { UP: 0, DOWN: 0 } };
+      this.makerInventory.set(marketSlug, inv);
+    }
+    return inv;
+  }
+  
+  /**
+   * Add surplus shares to inventory after maker fill
+   */
+  private addToInventory(marketSlug: string, side: V35Side, shares: number, price: number): void {
+    const inv = this.getInventory(marketSlug);
+    const existing = inv[side];
+    const existingAvg = inv.avgPrice[side];
+    
+    // Weighted average price
+    if (existing + shares > 0) {
+      inv.avgPrice[side] = (existing * existingAvg + shares * price) / (existing + shares);
+    }
+    inv[side] += shares;
+    
+    console.log(`[PairTracker] 📦 V36.5.3: Added ${shares} ${side} to inventory @ $${price.toFixed(3)}`);
+    console.log(`[PairTracker]    Inventory now: UP=${inv.UP} | DOWN=${inv.DOWN}`);
+  }
+  
+  /**
+   * Consume shares from inventory for a new taker (pre-hedge)
+   * Returns: { consumed: number, remainingNeeded: number, avgPrice: number }
+   */
+  private consumeFromInventory(
+    marketSlug: string, 
+    side: V35Side, 
+    needed: number
+  ): { consumed: number; remainingNeeded: number; avgPrice: number } {
+    const inv = this.getInventory(marketSlug);
+    const available = inv[side];
+    
+    if (available <= 0) {
+      return { consumed: 0, remainingNeeded: needed, avgPrice: 0 };
+    }
+    
+    const consumed = Math.min(available, needed);
+    const avgPrice = inv.avgPrice[side];
+    inv[side] -= consumed;
+    
+    console.log(`[PairTracker] 📦 V36.5.3: Consumed ${consumed} ${side} from inventory @ avg $${avgPrice.toFixed(3)}`);
+    console.log(`[PairTracker]    Inventory now: UP=${inv.UP} | DOWN=${inv.DOWN}`);
+    
+    return { 
+      consumed, 
+      remainingNeeded: needed - consumed,
+      avgPrice 
+    };
+  }
+  
+  /**
+   * Get current inventory levels (for dashboard/logging)
+   */
+  getInventoryStatus(marketSlug: string): { UP: number; DOWN: number } {
+    const inv = this.makerInventory.get(marketSlug);
+    return inv ? { UP: inv.UP, DOWN: inv.DOWN } : { UP: 0, DOWN: 0 };
   }
   
   /**
@@ -512,8 +610,68 @@ export class PairTracker {
         pair.status = 'WAITING_HEDGE';  // V36.5.2: Update status before maker placement
         pair.updatedAt = Date.now();
         
+        // =========================================================================
+        // V36.5.3: CHECK INVENTORY FIRST - PRE-HEDGING FROM SURPLUS
+        // =========================================================================
+        // If we have maker inventory from previous scaled orders, consume it
+        // instead of placing a new maker order. This makes the pair instantly hedged!
+        // =========================================================================
+        const inventoryResult = this.consumeFromInventory(market.slug, pair.makerSide, filledSize);
+        
+        if (inventoryResult.consumed > 0) {
+          console.log(`[PairTracker] 📦 V36.5.3: Pre-hedged ${inventoryResult.consumed}/${filledSize} from inventory!`);
+          
+          if (inventoryResult.remainingNeeded <= 0) {
+            // Fully pre-hedged from inventory!
+            pair.makerPlaced = true;
+            pair.makerFilledAt = Date.now();
+            pair.makerFilledPrice = inventoryResult.avgPrice;
+            pair.makerFilledSize = inventoryResult.consumed;
+            pair.makerPrice = inventoryResult.avgPrice;
+            pair.makerSize = inventoryResult.consumed;
+            pair.status = 'HEDGED';
+            pair.updatedAt = Date.now();
+            
+            // Calculate CPP
+            pair.actualCpp = filledPrice + inventoryResult.avgPrice;
+            pair.pnl = (1.0 - pair.actualCpp) * inventoryResult.consumed;
+            
+            console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+            console.log(`[PairTracker] 🟢 ${pairId} PRE-HEDGED FROM INVENTORY!`);
+            console.log(`[PairTracker]    TAKER: ${filledSize} ${pair.takerSide} @ $${filledPrice.toFixed(2)} (filled)`);
+            console.log(`[PairTracker]    MAKER: ${inventoryResult.consumed} ${pair.makerSide} @ $${inventoryResult.avgPrice.toFixed(3)} (from inventory)`);
+            console.log(`[PairTracker]    CPP: $${pair.actualCpp.toFixed(3)} | P&L: ${pair.pnl >= 0 ? '+' : ''}$${pair.pnl.toFixed(2)}`);
+            console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
+            
+            // Log pre-hedge event
+            logPairEvent({
+              pairId,
+              eventType: 'pair_prehedged_from_inventory',
+              marketSlug: market.slug,
+              asset: market.asset,
+              takerSide: pair.takerSide,
+              takerPrice: filledPrice,
+              takerSize: filledSize,
+              makerSide: pair.makerSide,
+              makerPrice: inventoryResult.avgPrice,
+              makerSize: inventoryResult.consumed,
+              cpp: pair.actualCpp,
+              pnl: pair.pnl,
+              status: 'HEDGED',
+            }).catch(() => {});
+            
+            return { success: true, pairId };
+          } else {
+            // Partially pre-hedged - still need some maker shares
+            // For now, place maker for the remaining needed
+            console.log(`[PairTracker] 📦 Partial pre-hedge: need ${inventoryResult.remainingNeeded} more via maker`);
+            // Update the size we need from the maker
+            pair.takerFilledSize = inventoryResult.remainingNeeded;
+          }
+        }
+        
         // Calculate and place maker
-        const makerPlaceResult = await this.placeMakerOrder(pair, market, filledPrice, filledSize);
+        const makerPlaceResult = await this.placeMakerOrder(pair, market, filledPrice, inventoryResult.remainingNeeded > 0 ? inventoryResult.remainingNeeded : filledSize);
         
         if (makerPlaceResult.success) {
           return { success: true, pairId };
@@ -860,9 +1018,18 @@ export class PairTracker {
             }).catch(() => {});
           }
           
+          // V36.5.3: Check for surplus shares to add to inventory
+          if (remainingFillSize > 0) {
+            console.log(`[PairTracker] 📦 V36.5.3: ${remainingFillSize} surplus shares from aggregated fill`);
+            this.addToInventory(market.slug, pair.makerSide, remainingFillSize, fill.price);
+          }
+          
           console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
           console.log(`[PairTracker] 🟢 AGGREGATED MAKER FILLED - ${linkedPairs.length} pairs hedged!`);
           console.log(`[PairTracker]    Total fill: ${fill.size} ${pair.makerSide} @ $${fill.price.toFixed(2)}`);
+          if (remainingFillSize > 0) {
+            console.log(`[PairTracker]    📦 Surplus: ${remainingFillSize} → inventory`);
+          }
           console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
           
           return { pairUpdated: true, pair };
@@ -878,13 +1045,25 @@ export class PairTracker {
         // Calculate actual CPP
         const takerCost = pair.takerFilledPrice || pair.takerPrice;
         pair.actualCpp = takerCost + fill.price;
-        pair.pnl = (1.0 - pair.actualCpp) * Math.min(pair.takerFilledSize || 0, fill.size);
+        
+        // V36.5.3: Check for surplus (maker scaled up beyond taker size)
+        const takerSize = pair.takerFilledSize || pair.takerSize;
+        const surplusShares = fill.size - takerSize;
+        
+        // P&L is based on the matched shares only
+        pair.pnl = (1.0 - pair.actualCpp) * Math.min(takerSize, fill.size);
         
         console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
         console.log(`[PairTracker] 🟢 ${pair.id} HEDGED - COMPLETE!`);
-        console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${pair.takerSide} @ $${takerCost.toFixed(2)} (filled)`);
+        console.log(`[PairTracker]    TAKER: ${takerSize} ${pair.takerSide} @ $${takerCost.toFixed(2)} (filled)`);
         console.log(`[PairTracker]    MAKER: ${fill.size} ${pair.makerSide} @ $${fill.price.toFixed(2)} (filled)`);
         console.log(`[PairTracker]    CPP: $${pair.actualCpp.toFixed(3)} | P&L: ${pair.pnl >= 0 ? '+' : ''}$${pair.pnl.toFixed(2)}`);
+        
+        // V36.5.3: Add surplus to inventory for future pre-hedging
+        if (surplusShares > 0) {
+          console.log(`[PairTracker]    📦 Surplus: ${surplusShares} ${pair.makerSide} → inventory`);
+          this.addToInventory(market.slug, pair.makerSide, surplusShares, fill.price);
+        }
         console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
         
         // Log maker fill event
