@@ -367,8 +367,12 @@ export class PairTracker {
     // Get token ID for taker
     const takerTokenId = expensiveSide === 'UP' ? market.upTokenId : market.downTokenId;
     
-    console.log(`[PairTracker] 🎯 V36.3.0 Opening pair ${pairId}`);
-    console.log(`[PairTracker]    TAKER: ${size} ${expensiveSide} @ market (~$${expensiveAsk.toFixed(3)})`);
+    console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+    console.log(`[PairTracker] 🎯 PAIR ${pairId} OPENED`);
+    console.log(`[PairTracker]    TAKER: ${size} ${expensiveSide} @ ~$${expensiveAsk.toFixed(2)}¢`);
+    console.log(`[PairTracker]    MAKER: ${size} ${cheapSide} @ ~$${projectedMakerPrice.toFixed(2)}¢ (target)`);
+    console.log(`[PairTracker]    TARGET CPP: $${this.config.targetCpp.toFixed(2)}`);
+    console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
     
     if (config.dryRun) {
       console.log(`[PairTracker] [DRY RUN] Would open pair`);
@@ -442,7 +446,7 @@ export class PairTracker {
         const filledSize = takerResult.filledSize || size;
         const filledPrice = takerResult.avgPrice || expensiveAsk;
         
-        console.log(`[PairTracker] 🎯 Taker FILLED: ${filledSize} @ $${filledPrice.toFixed(3)}`);
+        console.log(`[PairTracker] ✅ ${pairId} TAKER FILLED: ${filledSize} @ $${filledPrice.toFixed(2)}`);
         
         // Log taker fill event
         logPairEvent({
@@ -566,9 +570,12 @@ export class PairTracker {
       pair.status = 'WAITING_HEDGE';
       pair.updatedAt = Date.now();
       
-      console.log(`[PairTracker] ✓ MAKER PLACED: ${makerResult.orderId.slice(0, 8)}...`);
-      console.log(`[PairTracker]    Pair ${pair.id}: ${pair.takerSide} @ $${takerFilledPrice.toFixed(2)} + ${pair.makerSide} @ $${clampedMakerPrice.toFixed(2)}`);
-      console.log(`[PairTracker]    Projected CPP: $${(takerFilledPrice + clampedMakerPrice).toFixed(3)}`);
+      console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+      console.log(`[PairTracker] 📝 ${pair.id} MAKER PLACED`);
+      console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${pair.takerSide} @ $${takerFilledPrice.toFixed(2)} (filled)`);
+      console.log(`[PairTracker]    MAKER: ${takerFilledSize} ${pair.makerSide} @ $${clampedMakerPrice.toFixed(2)} (open)`);
+      console.log(`[PairTracker]    PROJECTED CPP: $${(takerFilledPrice + clampedMakerPrice).toFixed(3)}`);
+      console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
       
       // Log pair event to database
       logPairEvent({
@@ -668,8 +675,12 @@ export class PairTracker {
         pair.actualCpp = takerCost + fill.price;
         pair.pnl = (1.0 - pair.actualCpp) * Math.min(pair.takerFilledSize || 0, fill.size);
         
-        console.log(`[PairTracker] ✅ PAIR COMPLETE: ${pair.id}`);
-        console.log(`[PairTracker]    CPP: $${pair.actualCpp.toFixed(3)} | P&L: $${pair.pnl.toFixed(2)}`);
+        console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+        console.log(`[PairTracker] ✅ ${pair.id} HEDGED - COMPLETE!`);
+        console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${pair.takerSide} @ $${takerCost.toFixed(2)} (filled)`);
+        console.log(`[PairTracker]    MAKER: ${fill.size} ${pair.makerSide} @ $${fill.price.toFixed(2)} (filled)`);
+        console.log(`[PairTracker]    CPP: $${pair.actualCpp.toFixed(3)} | P&L: ${pair.pnl >= 0 ? '+' : ''}$${pair.pnl.toFixed(2)}`);
+        console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
         
         // Log maker fill event
         logPairEvent({
@@ -707,8 +718,12 @@ export class PairTracker {
         pair.actualCpp = takerCost + fill.price;
         pair.pnl = (1.0 - pair.actualCpp) * Math.min(pair.takerFilledSize || 0, fill.size);
         
-        console.log(`[PairTracker] 🛑 EMERGENCY COMPLETE: ${pair.id}`);
-        console.log(`[PairTracker]    CPP: $${pair.actualCpp.toFixed(3)} | P&L: $${pair.pnl.toFixed(2)}`);
+        console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+        console.log(`[PairTracker] 🛑 ${pair.id} EMERGENCY HEDGED`);
+        console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${pair.takerSide} @ $${takerCost.toFixed(2)} (filled)`);
+        console.log(`[PairTracker]    EMERGENCY: ${fill.size} ${pair.makerSide} @ $${fill.price.toFixed(2)} (filled)`);
+        console.log(`[PairTracker]    CPP: $${pair.actualCpp.toFixed(3)} | P&L: ${pair.pnl >= 0 ? '+' : ''}$${pair.pnl.toFixed(2)}`);
+        console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
         
         // Log emergency hedge event
         logPairEvent({
