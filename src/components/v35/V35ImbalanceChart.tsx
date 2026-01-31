@@ -53,39 +53,21 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
     const data: FillDataPoint[] = [];
 
     for (const fill of sortedFills) {
-      // Use outcome (UP/DOWN) for categorization, side (BUY/SELL) for direction
-      const outcome = (fill.outcome?.toUpperCase() || 'UP') as 'UP' | 'DOWN';
-      const side = (fill.side?.toUpperCase() || 'BUY') as 'BUY' | 'SELL';
+      // In V35 data, 'side' field contains the OUTCOME (UP/DOWN), not BUY/SELL
+      // The bot only BUYs - it never sells during market window
+      // So 'side' = which outcome was bought
+      const outcome = (fill.outcome?.toUpperCase() || fill.side?.toUpperCase() || 'UP') as 'UP' | 'DOWN';
       const price = fill.fill_price;
       const size = fill.fill_qty;
 
-      // BUY adds to position, SELL reduces position
-      if (side === 'BUY') {
-        if (outcome === 'UP') {
-          runningUp += size;
-          runningUpCost += size * price;
-        } else if (outcome === 'DOWN') {
-          runningDown += size;
-          runningDownCost += size * price;
-        }
-      } else if (side === 'SELL') {
-        if (outcome === 'UP') {
-          runningUp -= size;
-          // Reduce cost proportionally (FIFO approximation)
-          const avgCost = runningUp > 0 ? runningUpCost / (runningUp + size) : price;
-          runningUpCost -= size * avgCost;
-          runningUpCost = Math.max(0, runningUpCost);
-        } else if (outcome === 'DOWN') {
-          runningDown -= size;
-          const avgCost = runningDown > 0 ? runningDownCost / (runningDown + size) : price;
-          runningDownCost -= size * avgCost;
-          runningDownCost = Math.max(0, runningDownCost);
-        }
+      // All fills are BUYs - add to position
+      if (outcome === 'UP') {
+        runningUp += size;
+        runningUpCost += size * price;
+      } else if (outcome === 'DOWN') {
+        runningDown += size;
+        runningDownCost += size * price;
       }
-
-      // Ensure non-negative shares
-      runningUp = Math.max(0, runningUp);
-      runningDown = Math.max(0, runningDown);
 
       const time = new Date(fill.ts).toLocaleTimeString('nl-NL', { 
         hour: '2-digit', 
@@ -97,7 +79,7 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
         ts: fill.ts,
         time,
         outcome,
-        side,
+        side: 'BUY', // All fills are buys in V35
         price,
         size,
         up_shares: runningUp,
