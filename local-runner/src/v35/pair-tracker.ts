@@ -96,7 +96,7 @@ export interface PairTrackerConfig {
 }
 
 const DEFAULT_CONFIG: PairTrackerConfig = {
-  maxPendingPairs: 25,
+  maxPendingPairs: 1,               // V36.4.0: 1 pair at a time - fully hedge before next
   targetCpp: 0.95,
   emergencyMaxCpp: 1.05,
   emergencyTakerOffset: 0.005,
