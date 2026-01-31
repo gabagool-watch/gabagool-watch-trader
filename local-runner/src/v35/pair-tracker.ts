@@ -1,7 +1,14 @@
 // ============================================================
 // V36 PAIR TRACKER - INDEPENDENT PAIR LIFECYCLE MANAGEMENT
 // ============================================================
-// Version: V36.4.3 - "Fill Audit Fallback"
+// Version: V36.5.1 - "Independent Maker Sizing"
+//
+// V36.5.1 CRITICAL FIX:
+// - Maker size is calculated INDEPENDENTLY from taker size
+// - Formula: makerSize = max(takerSize, ceil(1.00 / makerPrice))
+// - This ensures maker orders always meet $1.00 minimum, even when
+//   cheap side price is low (e.g., $0.05 → needs 20 shares, not 10)
+// - Prevents "maker_price_below_minimum" blocks that caused imbalances
 //
 // V36.4.3 CRITICAL FIX:
 // - Early Whitelisting: Register orderId IMMEDIATELY after API response
@@ -297,34 +304,24 @@ export class PairTracker {
     const cheapSide: V35Side = expensiveSide === 'UP' ? 'DOWN' : 'UP';
     
     // =========================================================================
-    // MINIMUM ORDER VALUE CHECK ($1.00)
+    // MINIMUM ORDER VALUE CHECK ($1.00) - TAKER ONLY
+    // =========================================================================
+    // V36.5.1: We only check taker side here. Maker size is independently
+    // calculated in placeMakerOrder() to meet $1 minimum at that price.
     // =========================================================================
     const MIN_ORDER_VALUE = 1.00;
-    const MAX_ORDER_VALUE = 1.05;
     
     const takerOrderValue = size * expensiveAsk;
-    const makerOrderValue = size * cheapAsk;
     
-    if (takerOrderValue < MIN_ORDER_VALUE || makerOrderValue < MIN_ORDER_VALUE) {
+    if (takerOrderValue < MIN_ORDER_VALUE) {
       const minSharesForTaker = Math.ceil(MIN_ORDER_VALUE / expensiveAsk);
-      const minSharesForMaker = Math.ceil(MIN_ORDER_VALUE / cheapAsk);
-      const requiredSize = Math.max(minSharesForTaker, minSharesForMaker);
       
-      if (requiredSize > this.config.maxSharesPerPair) {
-        console.log(`[PairTracker] ⚠️ Cannot meet $1 minimum: need ${requiredSize} shares but max is ${this.config.maxSharesPerPair}`);
+      if (minSharesForTaker > this.config.maxSharesPerPair) {
+        console.log(`[PairTracker] ⚠️ Cannot meet $1 minimum for taker: need ${minSharesForTaker} shares but max is ${this.config.maxSharesPerPair}`);
         size = this.config.maxSharesPerPair;
       } else {
-        console.log(`[PairTracker] 📈 Adjusting size for $1 minimum: ${size} → ${requiredSize} shares`);
-        size = requiredSize;
-      }
-    }
-    
-    const adjustedMakerValue = size * cheapAsk;
-    if (adjustedMakerValue > MAX_ORDER_VALUE && cheapAsk < 0.10) {
-      const cappedSize = Math.floor(MAX_ORDER_VALUE / cheapAsk);
-      if (cappedSize >= Math.ceil(MIN_ORDER_VALUE / expensiveAsk)) {
-        console.log(`[PairTracker] 📉 Capping size to limit cheap side exposure: ${size} → ${cappedSize} shares`);
-        size = cappedSize;
+        console.log(`[PairTracker] 📈 Adjusting taker size for $1 minimum: ${size} → ${minSharesForTaker} shares`);
+        size = minSharesForTaker;
       }
     }
     
@@ -564,15 +561,40 @@ export class PairTracker {
     const clampedMakerPrice = Math.min(0.95, Math.max(0.05, makerPrice));
     const makerTokenId = pair.makerSide === 'UP' ? market.upTokenId : market.downTokenId;
     
-    console.log(`[PairTracker] 📝 Placing MAKER: ${pair.makerSide} @ $${clampedMakerPrice.toFixed(3)}`);
+    // =========================================================================
+    // V36.5.1: INDEPENDENT MAKER SIZE CALCULATION
+    // =========================================================================
+    // Problem: Taker @ $0.90 -> 10 shares = $9 ✅ meets $1 min
+    //          Maker @ $0.05 -> 10 shares = $0.50 ❌ BLOCKED by exchange!
+    //
+    // Solution: Scale maker size UP only when needed to meet $1 minimum.
+    // Formula: makerSize = max(takerFilledSize, ceil(1.00 / makerPrice))
+    // 
+    // Examples:
+    //   - makerPrice=$0.05, takerSize=10 -> need ceil(1.00/0.05)=20 shares
+    //   - makerPrice=$0.40, takerSize=10 -> need ceil(1.00/0.40)=3, use 10
+    // =========================================================================
+    const MIN_ORDER_VALUE = 1.00;
+    const minSharesForMaker = Math.ceil(MIN_ORDER_VALUE / clampedMakerPrice);
+    const makerSize = Math.max(takerFilledSize, minSharesForMaker);
+    
+    const wasScaledUp = makerSize > takerFilledSize;
+    if (wasScaledUp) {
+      console.log(`[PairTracker] 📈 V36.5.1: Maker size scaled: ${takerFilledSize} → ${makerSize} shares (min $1 @ $${clampedMakerPrice.toFixed(3)})`);
+    }
+    
+    console.log(`[PairTracker] 📝 Placing MAKER: ${makerSize} ${pair.makerSide} @ $${clampedMakerPrice.toFixed(3)}`);
     console.log(`[PairTracker]    Calculation: $${this.config.targetCpp.toFixed(2)} - $${takerFilledPrice.toFixed(3)} = $${makerPrice.toFixed(3)}`);
+    if (wasScaledUp) {
+      console.log(`[PairTracker]    ⚠️ Maker value: ${makerSize} × $${clampedMakerPrice.toFixed(3)} = $${(makerSize * clampedMakerPrice).toFixed(2)}`);
+    }
     
     try {
       const makerResult = await placeOrder({
         tokenId: makerTokenId,
         side: 'BUY',
         price: clampedMakerPrice,
-        size: takerFilledSize,
+        size: makerSize,  // V36.5.1: Use scaled size
         orderType: 'GTC',
       });
       
@@ -595,13 +617,14 @@ export class PairTracker {
       // Update pair state (makerPlaced already true)
       pair.makerOrderId = makerResult.orderId;
       pair.makerPrice = clampedMakerPrice;
+      pair.makerSize = makerSize;  // V36.5.1: Store actual (possibly scaled) maker size
       pair.status = 'WAITING_HEDGE';
       pair.updatedAt = Date.now();
       
       console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
       console.log(`[PairTracker] 🟠 ${pair.id} MAKER PLACED`);
       console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${pair.takerSide} @ $${takerFilledPrice.toFixed(2)} (filled)`);
-      console.log(`[PairTracker]    MAKER: ${takerFilledSize} ${pair.makerSide} @ $${clampedMakerPrice.toFixed(2)} (open)`);
+      console.log(`[PairTracker]    MAKER: ${makerSize} ${pair.makerSide} @ $${clampedMakerPrice.toFixed(2)} (open)${wasScaledUp ? ' [SCALED]' : ''}`);
       console.log(`[PairTracker]    PROJECTED CPP: $${(takerFilledPrice + clampedMakerPrice).toFixed(3)}`);
       console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
       
@@ -616,7 +639,8 @@ export class PairTracker {
         takerSize: takerFilledSize,
         makerSide: pair.makerSide,
         makerPrice: clampedMakerPrice,
-        makerSize: takerFilledSize,
+        makerSize: makerSize,  // V36.5.1: Log actual size
+        makerSizeScaled: wasScaledUp,  // V36.5.1: Track if scaling was applied
         status: 'WAITING_HEDGE',
       }).catch(() => {});
       
