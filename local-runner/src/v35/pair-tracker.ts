@@ -638,11 +638,12 @@ export class PairTracker {
       // place the maker now. This handles the edge case where FOK doesn't
       // report as filled immediately.
       // =========================================================================
+      // V36.4.2: FIX - fill.side is 'BUY'/'SELL', pair.takerSide is 'UP'/'DOWN'
+      // We always BUY for taker fills, so check the order ID match instead!
       const isTakerMatch = 
         pair.status === 'PENDING_ENTRY' &&
-        pair.takerSide === fill.side &&
         !pair.takerFilledAt &&
-        (pair.takerOrderId === fill.orderId || !pair.takerOrderId);
+        pair.takerOrderId === fill.orderId;
       
       if (isTakerMatch) {
         console.log(`[PairTracker] 🎯 WebSocket taker fill detected for ${pair.id}`);
