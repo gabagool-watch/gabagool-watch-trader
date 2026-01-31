@@ -282,6 +282,59 @@ export async function logV35GuardEvent(event: V35GuardEvent): Promise<boolean> {
 }
 
 // ============================================================
+// PAIR EVENT LOGGING (V36.4.0)
+// ============================================================
+
+export interface V35PairEvent {
+  pairId: string;
+  eventType: 'pair_opened' | 'pair_taker_filled' | 'pair_maker_placed' | 'pair_maker_filled' | 'pair_hedged' | 'pair_emergency' | 'pair_expired';
+  marketSlug: string;
+  asset: string;
+  takerSide: 'UP' | 'DOWN';
+  takerPrice: number;
+  takerSize: number;
+  makerSide: 'UP' | 'DOWN';
+  makerPrice: number;
+  makerSize: number;
+  fillPrice?: number;
+  fillSize?: number;
+  cpp?: number;
+  pnl?: number;
+  status: string;
+}
+
+export async function logPairEvent(event: V35PairEvent): Promise<boolean> {
+  try {
+    const result = await callProxy<{ success: boolean }>('save-bot-event', {
+      event: {
+        event_type: event.eventType,
+        asset: event.asset,
+        market_id: event.marketSlug,
+        reason_code: event.status,
+        ts: Date.now(),
+        data: {
+          pair_id: event.pairId,
+          taker_side: event.takerSide,
+          taker_price: event.takerPrice,
+          taker_size: event.takerSize,
+          maker_side: event.makerSide,
+          maker_price: event.makerPrice,
+          maker_size: event.makerSize,
+          fill_price: event.fillPrice,
+          fill_size: event.fillSize,
+          cpp: event.cpp,
+          pnl: event.pnl,
+        },
+      },
+    });
+    return result.success;
+  } catch (err: any) {
+    console.error('[V35Backend] Log pair event failed:', err?.message);
+    return false;
+  }
+}
+
+// ============================================================
 // INVENTORY SNAPSHOT LOGGING
 // ============================================================
 

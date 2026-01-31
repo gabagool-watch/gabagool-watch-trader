@@ -23,7 +23,7 @@
 import type { V35Market, V35Side, V35Asset, V35Fill } from './types.js';
 import { placeOrder, cancelOrder, getOpenOrders } from '../polymarket.js';
 import { getBinanceFeed } from './binance-feed.js';
-import { logV35GuardEvent } from './backend.js';
+import { logV35GuardEvent, logPairEvent } from './backend.js';
 import { getV35Config } from './config.js';
 // CRITICAL: Register our order IDs so fills are recognized as ours!
 import { registerOurOrderId } from './user-ws.js';
@@ -444,6 +444,23 @@ export class PairTracker {
         
         console.log(`[PairTracker] 🎯 Taker FILLED: ${filledSize} @ $${filledPrice.toFixed(3)}`);
         
+        // Log taker fill event
+        logPairEvent({
+          pairId,
+          eventType: 'pair_taker_filled',
+          marketSlug: market.slug,
+          asset: market.asset,
+          takerSide: expensiveSide,
+          takerPrice: filledPrice,
+          takerSize: filledSize,
+          makerSide: pair.makerSide,
+          makerPrice: 0,
+          makerSize: filledSize,
+          fillPrice: filledPrice,
+          fillSize: filledSize,
+          status: 'PENDING_ENTRY',
+        }).catch(() => {});
+        
         // Update pair state
         pair.takerFilledAt = Date.now();
         pair.takerFilledPrice = filledPrice;
@@ -553,16 +570,19 @@ export class PairTracker {
       console.log(`[PairTracker]    Pair ${pair.id}: ${pair.takerSide} @ $${takerFilledPrice.toFixed(2)} + ${pair.makerSide} @ $${clampedMakerPrice.toFixed(2)}`);
       console.log(`[PairTracker]    Projected CPP: $${(takerFilledPrice + clampedMakerPrice).toFixed(3)}`);
       
-      // Log to database
-      logV35GuardEvent({
+      // Log pair event to database
+      logPairEvent({
+        pairId: pair.id,
+        eventType: 'pair_maker_placed',
         marketSlug: market.slug,
         asset: market.asset,
-        guardType: 'MAKER_PLACED',
-        blockedSide: null,
-        upQty: market.upQty,
-        downQty: market.downQty,
-        expensiveSide: pair.takerSide,
-        reason: `Pair ${pair.id}: TAKER @ $${takerFilledPrice.toFixed(2)}, MAKER ${pair.makerSide} @ $${clampedMakerPrice.toFixed(2)} (CPP: $${(takerFilledPrice + clampedMakerPrice).toFixed(3)})`,
+        takerSide: pair.takerSide,
+        takerPrice: takerFilledPrice,
+        takerSize: takerFilledSize,
+        makerSide: pair.makerSide,
+        makerPrice: clampedMakerPrice,
+        makerSize: takerFilledSize,
+        status: 'WAITING_HEDGE',
       }).catch(() => {});
       
       return { success: true };
@@ -651,6 +671,25 @@ export class PairTracker {
         console.log(`[PairTracker] ✅ PAIR COMPLETE: ${pair.id}`);
         console.log(`[PairTracker]    CPP: $${pair.actualCpp.toFixed(3)} | P&L: $${pair.pnl.toFixed(2)}`);
         
+        // Log maker fill event
+        logPairEvent({
+          pairId: pair.id,
+          eventType: 'pair_hedged',
+          marketSlug: market.slug,
+          asset: market.asset,
+          takerSide: pair.takerSide,
+          takerPrice: pair.takerFilledPrice || pair.takerPrice,
+          takerSize: pair.takerFilledSize || pair.takerSize,
+          makerSide: pair.makerSide,
+          makerPrice: fill.price,
+          makerSize: fill.size,
+          fillPrice: fill.price,
+          fillSize: fill.size,
+          cpp: pair.actualCpp,
+          pnl: pair.pnl,
+          status: 'HEDGED',
+        }).catch(() => {});
+        
         return { pairUpdated: true, pair };
       }
       
@@ -670,6 +709,25 @@ export class PairTracker {
         
         console.log(`[PairTracker] 🛑 EMERGENCY COMPLETE: ${pair.id}`);
         console.log(`[PairTracker]    CPP: $${pair.actualCpp.toFixed(3)} | P&L: $${pair.pnl.toFixed(2)}`);
+        
+        // Log emergency hedge event
+        logPairEvent({
+          pairId: pair.id,
+          eventType: 'pair_emergency',
+          marketSlug: market.slug,
+          asset: market.asset,
+          takerSide: pair.takerSide,
+          takerPrice: pair.takerFilledPrice || pair.takerPrice,
+          takerSize: pair.takerFilledSize || pair.takerSize,
+          makerSide: pair.makerSide,
+          makerPrice: fill.price,
+          makerSize: fill.size,
+          fillPrice: fill.price,
+          fillSize: fill.size,
+          cpp: pair.actualCpp,
+          pnl: pair.pnl,
+          status: 'EMERGENCY_HEDGED',
+        }).catch(() => {});
         
         return { pairUpdated: true, pair };
       }
