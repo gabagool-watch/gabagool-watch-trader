@@ -292,16 +292,25 @@ export interface V35InventorySnapshot {
   downShares: number;
   avgUpCost: number | null;
   avgDownCost: number | null;
-  pairedShares: number;
-  unpairedShares: number;
-  unpairedNotionalUsd: number;
-  pairCost: number | null;
-  state: 'BALANCED' | 'WARNING' | 'CRITICAL';
-  triggerType: 'FILL' | 'HEDGE' | 'SYNC' | 'CYCLE';
+  pairedShares?: number;
+  unpairedShares?: number;
+  unpairedNotionalUsd?: number;
+  pairCost?: number | null;
+  combinedCost?: number | null;  // V36.3.7: Alias for pairCost
+  state: string;  // V36.3.7: More flexible states
+  triggerType: 'FILL' | 'HEDGE' | 'SYNC' | 'CYCLE' | 'TICK';  // V36.3.7: Added TICK
 }
 
 export async function saveV35InventorySnapshot(snapshot: V35InventorySnapshot): Promise<boolean> {
   try {
+    // V36.3.7: Calculate derived fields if not provided
+    const paired = snapshot.pairedShares ?? Math.min(snapshot.upShares, snapshot.downShares);
+    const unpaired = snapshot.unpairedShares ?? Math.abs(snapshot.upShares - snapshot.downShares);
+    const avgUp = snapshot.avgUpCost ?? 0;
+    const avgDown = snapshot.avgDownCost ?? 0;
+    const pairCost = snapshot.pairCost ?? snapshot.combinedCost ?? ((avgUp > 0 && avgDown > 0) ? avgUp + avgDown : null);
+    const unpairedNotional = snapshot.unpairedNotionalUsd ?? (unpaired * Math.max(avgUp, avgDown));
+    
     const result = await callProxy<{ success: boolean }>('save-inventory-snapshot', {
       snapshot: {
         ts: Date.now(),
@@ -311,10 +320,10 @@ export async function saveV35InventorySnapshot(snapshot: V35InventorySnapshot): 
         down_shares: snapshot.downShares,
         avg_up_cost: snapshot.avgUpCost,
         avg_down_cost: snapshot.avgDownCost,
-        paired_shares: snapshot.pairedShares,
-        unpaired_shares: snapshot.unpairedShares,
-        unpaired_notional_usd: snapshot.unpairedNotionalUsd,
-        pair_cost: snapshot.pairCost,
+        paired_shares: paired,
+        unpaired_shares: unpaired,
+        unpaired_notional_usd: unpairedNotional,
+        pair_cost: pairCost,
         state: snapshot.state,
         trigger_type: snapshot.triggerType,
       },
