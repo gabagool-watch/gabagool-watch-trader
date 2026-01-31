@@ -928,16 +928,23 @@ async function processMarket(market: V35Market): Promise<void> {
       const projectedMakerPrice = targetCpp - takerPrice;
       const projectedCpp = takerPrice + Math.max(0.05, projectedMakerPrice);
       
-      log(`   📊 V36.2 Pair Analysis:`);
+      // V36.3.8: Calculate if maker is viable
+      const makerViable = cheapAsk <= projectedMakerPrice + 0.03;
+      const makerGap = cheapAsk - projectedMakerPrice;
+      const makerViableIndicator = makerViable ? '✅' : '🚫';
+      
+      log(`   📊 V36.3.8 Pair Analysis:`);
       log(`      TAKER ${expensiveSide} @ ~$${takerPrice.toFixed(3)} (market order)`);
       log(`      MAKER ${cheapSide} @ ~$${projectedMakerPrice.toFixed(3)} (after fill: $0.95 - fillPrice)`);
+      log(`      ${makerViableIndicator} Maker viability: ask $${cheapAsk.toFixed(3)} | gap ${(makerGap * 100).toFixed(1)}¢`);
       log(`      Target CPP: $${targetCpp.toFixed(3)} | Estimated: $${projectedCpp.toFixed(3)}`);
       
       // V36.2: ALWAYS open pair if we can (no CPP check)
+      // V36.3.8: But now canOpenNewPair() includes unhedged exposure check!
       if (pairTracker.canOpenNewPair()) {
         const pairSize = Math.max(5, Math.min(15, 10)); // 5-15 shares per pair
         
-        log(`   🎯 V36.2: Opening pair (no CPP check - always enter!)`);
+        log(`   🎯 V36.3.8: Opening pair (maker viability: ${makerViable ? 'OK' : 'BLOCKED'})`);
         
         const pairResult = await pairTracker.openPair(market, expensiveSide, pairSize);
         
@@ -947,7 +954,7 @@ async function processMarket(market: V35Market): Promise<void> {
           log(`   ⚠️ Pair open failed: ${pairResult.error}`);
         }
       } else {
-        log(`   ⏸️ Max pairs reached (${pairStats.activePairs}/${5}) - waiting for fills`);
+        log(`   ⏸️ Pair blocked - waiting for hedges or conditions to improve`);
       }
     }
     

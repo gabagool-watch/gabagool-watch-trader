@@ -163,6 +163,10 @@ export class PairTracker {
   
   /**
    * Check if we can open a new pair (respects max pairs AND cooldown)
+   * 
+   * V36.3.8 CRITICAL FIX: Block new pairs if too many are WAITING_HEDGE!
+   * This was the root cause of massive losses - bot kept placing takers
+   * while makers weren't being filled, creating huge unhedged exposure.
    */
   canOpenNewPair(): boolean {
     const activePairs = this.getActivePairs();
@@ -176,6 +180,16 @@ export class PairTracker {
     if (timeSinceLastPair < this.config.pairCooldownMs) {
       const remaining = Math.ceil((this.config.pairCooldownMs - timeSinceLastPair) / 1000);
       console.log(`[PairTracker] ⏳ Pair cooldown: ${remaining}s remaining`);
+      return false;
+    }
+    
+    // V36.3.8 CRITICAL: Block if too many WAITING_HEDGE pairs!
+    // These are takers that filled but makers haven't → unhedged exposure!
+    // Max 3 waiting pairs allowed - if more, we MUST wait for makers to fill
+    const MAX_WAITING_HEDGE = 3;
+    if (waiting >= MAX_WAITING_HEDGE) {
+      console.log(`[PairTracker] 🚨 V36.3.8 BLOCK: ${waiting} pairs WAITING_HEDGE (max ${MAX_WAITING_HEDGE}) - too much unhedged exposure!`);
+      console.log(`[PairTracker]    💡 Waiting for maker orders to fill before opening more pairs`);
       return false;
     }
     
@@ -315,6 +329,37 @@ export class PairTracker {
       console.log(`[PairTracker] 🚫 Expensive side @ $${expensiveAsk.toFixed(3)} > $${MAX_TAKER_PRICE.toFixed(2)} cap - no edge`);
       return { success: false, error: 'expensive_side_above_cap' };
     }
+    
+    // =========================================================================
+    // V36.3.8 CRITICAL: PRE-CHECK MAKER VIABILITY!
+    // =========================================================================
+    // Before placing taker, verify that the maker price is ACHIEVABLE.
+    // If makerPrice < cheapAsk (market ask for cheap side), the maker will
+    // NEVER fill because we'd be bidding below the market.
+    // 
+    // This was the ROOT CAUSE of losses: takers filled @ $0.87, but
+    // maker @ $0.08 couldn't fill when cheap ask was $0.27!
+    // =========================================================================
+    const projectedMakerPrice = this.config.targetCpp - expensiveAsk;
+    
+    // Maker must be at least $0.05 (Polymarket minimum)
+    if (projectedMakerPrice < 0.05) {
+      console.log(`[PairTracker] 🚫 V36.3.8 Maker price too low: $${projectedMakerPrice.toFixed(3)} < $0.05 minimum`);
+      return { success: false, error: 'maker_price_below_minimum' };
+    }
+    
+    // V36.3.8: Check if maker can realistically fill
+    // If cheapAsk is significantly above our maker bid, it won't fill
+    const MAKER_FILL_BUFFER = 0.03; // Allow 3¢ buffer for spread movement
+    if (cheapAsk > projectedMakerPrice + MAKER_FILL_BUFFER) {
+      console.log(`[PairTracker] 🚫 V36.3.8 Maker UNLIKELY to fill!`);
+      console.log(`[PairTracker]    Maker bid: $${projectedMakerPrice.toFixed(3)} | Cheap ask: $${cheapAsk.toFixed(3)}`);
+      console.log(`[PairTracker]    Gap: ${((cheapAsk - projectedMakerPrice) * 100).toFixed(1)}¢ > ${(MAKER_FILL_BUFFER * 100).toFixed(0)}¢ buffer`);
+      console.log(`[PairTracker]    💡 Waiting for better conditions (lower cheap ask or higher expensive ask)`);
+      return { success: false, error: 'maker_unlikely_to_fill' };
+    }
+    
+    console.log(`[PairTracker] ✓ V36.3.8 Maker viable: bid $${projectedMakerPrice.toFixed(3)} vs ask $${cheapAsk.toFixed(3)}`)
     
     // Create pair ID
     const pairId = `pair_${Date.now()}_${++this.pairCounter}`;
