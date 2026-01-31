@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/integrations/supabase/client';
 import { useV35Realtime } from '@/hooks/useV35Realtime';
+import { useIsMobile } from '@/hooks/use-mobile';
 import { MainNav } from '@/components/MainNav';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -9,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { V35LogViewer, V35FillsTable, V35ExportButton, V35StrategyPDFExport, V35OpenPositions, V35LivePriceHeader, V35DecisionLog, V35ExpirySnapshots, V35MarketPnLTable } from '@/components/v35';
 import { toast } from 'sonner';
 import { 
@@ -26,7 +28,8 @@ import {
   ScrollText,
   Power,
   AlertTriangle,
-  Brain
+  Brain,
+  ChevronDown
 } from 'lucide-react';
 
 interface RunnerHeartbeat {
@@ -62,10 +65,22 @@ interface V35Settlement {
   created_at: string;
 }
 
+const TAB_OPTIONS = [
+  { value: 'pnl', label: 'P&L', icon: DollarSign },
+  { value: 'decisions', label: 'Decisions', icon: Brain },
+  { value: 'positions', label: 'Positions', icon: Scale },
+  { value: 'snapshots', label: 'Expiry Snapshots', icon: Clock },
+  { value: 'overview', label: 'Overview', icon: BarChart3 },
+  { value: 'logs', label: 'Event Log', icon: ScrollText },
+  { value: 'fills', label: 'Fills', icon: Zap },
+];
+
 export default function V35Dashboard() {
   const [isOnline, setIsOnline] = useState(false);
   const [lastSeen, setLastSeen] = useState<Date | null>(null);
+  const [activeTab, setActiveTab] = useState('pnl');
   const queryClient = useQueryClient();
+  const isMobile = useIsMobile();
 
   // Enable realtime subscriptions
   useV35Realtime();
@@ -326,37 +341,53 @@ export default function V35Dashboard() {
         </Card>
 
         {/* Tabs for Positions, Settlements, Logs, Fills, Snapshots */}
-        <Tabs defaultValue="pnl" className="space-y-4">
-          <TabsList>
-            <TabsTrigger value="pnl">
-              <DollarSign className="h-4 w-4 mr-2" />
-              P&L
-            </TabsTrigger>
-            <TabsTrigger value="decisions">
-              <Brain className="h-4 w-4 mr-2" />
-              Decisions
-            </TabsTrigger>
-            <TabsTrigger value="positions">
-              <Scale className="h-4 w-4 mr-2" />
-              Positions
-            </TabsTrigger>
-            <TabsTrigger value="snapshots">
-              <Clock className="h-4 w-4 mr-2" />
-              Expiry Snapshots
-            </TabsTrigger>
-            <TabsTrigger value="overview">
-              <BarChart3 className="h-4 w-4 mr-2" />
-              Overview
-            </TabsTrigger>
-            <TabsTrigger value="logs">
-              <ScrollText className="h-4 w-4 mr-2" />
-              Event Log
-            </TabsTrigger>
-            <TabsTrigger value="fills">
-              <Zap className="h-4 w-4 mr-2" />
-              Fills
-            </TabsTrigger>
-          </TabsList>
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
+          {/* Mobile: Dropdown selector */}
+          {isMobile ? (
+            <Select value={activeTab} onValueChange={setActiveTab}>
+              <SelectTrigger className="w-full bg-background">
+                <SelectValue>
+                  {(() => {
+                    const tab = TAB_OPTIONS.find(t => t.value === activeTab);
+                    if (!tab) return 'Select...';
+                    const Icon = tab.icon;
+                    return (
+                      <span className="flex items-center gap-2">
+                        <Icon className="h-4 w-4" />
+                        {tab.label}
+                      </span>
+                    );
+                  })()}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent className="bg-background z-50">
+                {TAB_OPTIONS.map((tab) => {
+                  const Icon = tab.icon;
+                  return (
+                    <SelectItem key={tab.value} value={tab.value}>
+                      <span className="flex items-center gap-2">
+                        <Icon className="h-4 w-4" />
+                        {tab.label}
+                      </span>
+                    </SelectItem>
+                  );
+                })}
+              </SelectContent>
+            </Select>
+          ) : (
+            /* Desktop: Regular tabs */
+            <TabsList>
+              {TAB_OPTIONS.map((tab) => {
+                const Icon = tab.icon;
+                return (
+                  <TabsTrigger key={tab.value} value={tab.value}>
+                    <Icon className="h-4 w-4 mr-2" />
+                    {tab.label}
+                  </TabsTrigger>
+                );
+              })}
+            </TabsList>
+          )}
 
           <TabsContent value="pnl">
             <V35MarketPnLTable />
