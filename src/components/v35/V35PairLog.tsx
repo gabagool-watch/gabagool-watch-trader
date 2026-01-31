@@ -15,11 +15,11 @@ interface PairEvent {
   takerSide: string;
   takerPrice: number;
   takerSize: number;
-  takerStatus: 'pending' | 'filled' | 'failed';
+  takerStatus: 'pending' | 'filled' | 'failed' | 'blocked';
   makerSide: string;
   makerPrice: number;
   makerSize: number;
-  makerStatus: 'pending' | 'open' | 'filled' | 'failed';
+  makerStatus: 'pending' | 'open' | 'filled' | 'failed' | 'blocked';
   cpp?: number;
   pnl?: number;
   createdAt: number;
@@ -40,7 +40,7 @@ export function V35PairLog() {
       const { data, error } = await supabase
         .from('bot_events')
         .select('*')
-        .in('event_type', ['pair_opened', 'pair_taker_filled', 'pair_maker_placed', 'pair_maker_filled', 'pair_hedged', 'pair_emergency'])
+        .in('event_type', ['pair_opened', 'pair_taker_filled', 'pair_maker_placed', 'pair_maker_filled', 'pair_hedged', 'pair_emergency', 'pair_blocked'])
         .order('ts', { ascending: false })
         .limit(200);
 
@@ -103,6 +103,10 @@ export function V35PairLog() {
             pair.makerStatus = 'filled';
             pair.cpp = (eventData?.cpp as number);
             break;
+          case 'pair_blocked':
+            pair.takerStatus = 'blocked';
+            pair.makerStatus = 'blocked';
+            break;
         }
         
         pair.updatedAt = Math.max(pair.updatedAt, event.ts);
@@ -138,7 +142,7 @@ export function V35PairLog() {
           const event = payload.new as Record<string, unknown>;
           const eventType = event.event_type as string;
           
-          if (['pair_opened', 'pair_taker_filled', 'pair_maker_placed', 'pair_maker_filled', 'pair_hedged', 'pair_emergency'].includes(eventType)) {
+          if (['pair_opened', 'pair_taker_filled', 'pair_maker_placed', 'pair_maker_filled', 'pair_hedged', 'pair_emergency', 'pair_blocked'].includes(eventType)) {
             fetchPairs();
           }
         }
@@ -160,12 +164,17 @@ export function V35PairLog() {
         return <Badge className="bg-slate-500/20 text-slate-400 text-[10px] px-1">PENDING</Badge>;
       case 'failed':
         return <Badge className="bg-red-500/20 text-red-400 text-[10px] px-1">FAILED</Badge>;
+      case 'blocked':
+        return <Badge className="bg-red-500/20 text-red-400 text-[10px] px-1">BLOCKED</Badge>;
       default:
         return <Badge className="bg-slate-500/20 text-slate-400 text-[10px] px-1">{status.toUpperCase()}</Badge>;
     }
   };
 
   const getPairStatusIcon = (pair: PairEvent) => {
+    if (pair.takerStatus === 'blocked' || pair.makerStatus === 'blocked') {
+      return <AlertTriangle className="h-4 w-4 text-red-400" />;
+    }
     if (pair.takerStatus === 'filled' && pair.makerStatus === 'filled') {
       return <CheckCircle2 className="h-4 w-4 text-emerald-400" />;
     }

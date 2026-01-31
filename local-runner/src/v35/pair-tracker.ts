@@ -326,36 +326,68 @@ export class PairTracker {
     // V36.3.3: Block taker orders above $0.95 - no profit margin possible
     const MAX_TAKER_PRICE = 0.95;
     if (expensiveAsk > MAX_TAKER_PRICE) {
-      console.log(`[PairTracker] 🚫 Expensive side @ $${expensiveAsk.toFixed(3)} > $${MAX_TAKER_PRICE.toFixed(2)} cap - no edge`);
+      console.log(`[PairTracker] 🔴 BLOCKED: Expensive side @ $${expensiveAsk.toFixed(3)} > $${MAX_TAKER_PRICE.toFixed(2)} cap`);
+      // Log to database
+      logPairEvent({
+        pairId: `blocked_${Date.now()}`,
+        eventType: 'pair_blocked',
+        marketSlug: market.slug,
+        asset: market.asset,
+        takerSide: expensiveSide,
+        takerPrice: expensiveAsk,
+        takerSize: size,
+        makerSide: cheapSide,
+        makerPrice: 0,
+        makerSize: size,
+        status: 'expensive_side_above_cap',
+      });
       return { success: false, error: 'expensive_side_above_cap' };
     }
     
     // =========================================================================
     // V36.3.8 CRITICAL: PRE-CHECK MAKER VIABILITY!
     // =========================================================================
-    // Before placing taker, verify that the maker price is ACHIEVABLE.
-    // If makerPrice < cheapAsk (market ask for cheap side), the maker will
-    // NEVER fill because we'd be bidding below the market.
-    // 
-    // This was the ROOT CAUSE of losses: takers filled @ $0.87, but
-    // maker @ $0.08 couldn't fill when cheap ask was $0.27!
-    // =========================================================================
     const projectedMakerPrice = this.config.targetCpp - expensiveAsk;
     
     // Maker must be at least $0.05 (Polymarket minimum)
     if (projectedMakerPrice < 0.05) {
-      console.log(`[PairTracker] 🚫 V36.3.8 Maker price too low: $${projectedMakerPrice.toFixed(3)} < $0.05 minimum`);
+      console.log(`[PairTracker] 🔴 BLOCKED: Maker price $${projectedMakerPrice.toFixed(3)} < $0.05 min`);
+      logPairEvent({
+        pairId: `blocked_${Date.now()}`,
+        eventType: 'pair_blocked',
+        marketSlug: market.slug,
+        asset: market.asset,
+        takerSide: expensiveSide,
+        takerPrice: expensiveAsk,
+        takerSize: size,
+        makerSide: cheapSide,
+        makerPrice: projectedMakerPrice,
+        makerSize: size,
+        status: 'maker_price_below_minimum',
+      });
       return { success: false, error: 'maker_price_below_minimum' };
     }
     
     // V36.3.8: Check if maker can realistically fill
-    // If cheapAsk is significantly above our maker bid, it won't fill
     const MAKER_FILL_BUFFER = 0.03; // Allow 3¢ buffer for spread movement
     if (cheapAsk > projectedMakerPrice + MAKER_FILL_BUFFER) {
-      console.log(`[PairTracker] 🚫 V36.3.8 Maker UNLIKELY to fill!`);
-      console.log(`[PairTracker]    Maker bid: $${projectedMakerPrice.toFixed(3)} | Cheap ask: $${cheapAsk.toFixed(3)}`);
-      console.log(`[PairTracker]    Gap: ${((cheapAsk - projectedMakerPrice) * 100).toFixed(1)}¢ > ${(MAKER_FILL_BUFFER * 100).toFixed(0)}¢ buffer`);
-      console.log(`[PairTracker]    💡 Waiting for better conditions (lower cheap ask or higher expensive ask)`);
+      const gap = cheapAsk - projectedMakerPrice;
+      console.log(`[PairTracker] 🔴 BLOCKED: Maker unlikely to fill`);
+      console.log(`[PairTracker]    Maker bid: $${projectedMakerPrice.toFixed(3)} | Cheap ask: $${cheapAsk.toFixed(3)} | Gap: ${(gap * 100).toFixed(1)}¢`);
+      logPairEvent({
+        pairId: `blocked_${Date.now()}`,
+        eventType: 'pair_blocked',
+        marketSlug: market.slug,
+        asset: market.asset,
+        takerSide: expensiveSide,
+        takerPrice: expensiveAsk,
+        takerSize: size,
+        makerSide: cheapSide,
+        makerPrice: projectedMakerPrice,
+        makerSize: size,
+        cpp: cheapAsk, // Store cheap ask in cpp field for debugging
+        status: 'maker_unlikely_to_fill',
+      });
       return { success: false, error: 'maker_unlikely_to_fill' };
     }
     
