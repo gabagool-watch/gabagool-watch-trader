@@ -19,14 +19,18 @@ interface ExpirySnapshot {
   seconds_before_expiry: number;
   api_up_qty: number;
   api_down_qty: number;
+  api_up_cost: number;
+  api_down_cost: number;
   paired: number;
   unpaired: number;
   combined_cost: number;
   locked_profit: number;
+  total_cost: number;
+  predicted_winning_side: string | null;
+  predicted_final_value: number;
+  predicted_pnl: number;
   was_imbalanced: boolean;
   imbalance_ratio: number | null;
-  pnl?: number;
-  winner?: string;
   created_at: string;
 }
 
@@ -160,8 +164,10 @@ export function V35ExpirySnapshots() {
                     <TableHead>Asset</TableHead>
                     <TableHead className="text-right">UP</TableHead>
                     <TableHead className="text-right">DOWN</TableHead>
-                    <TableHead className="text-right">Paired</TableHead>
-                    <TableHead className="text-right">CPP</TableHead>
+                    <TableHead className="text-right">UP Cost</TableHead>
+                    <TableHead className="text-right">DOWN Cost</TableHead>
+                    <TableHead className="text-right">Total Cost</TableHead>
+                    <TableHead>Winner</TableHead>
                     <TableHead className="text-right">P&L</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead></TableHead>
@@ -169,9 +175,25 @@ export function V35ExpirySnapshots() {
                 </TableHeader>
                 <TableBody>
                   {snapshots.map((snapshot) => {
-                    const isProfitable = snapshot.combined_cost > 0 && snapshot.combined_cost < 1.0;
-                    const profitPct = isProfitable ? ((1 - snapshot.combined_cost) * 100).toFixed(1) : "0";
-                    const pnl = snapshot.pnl ?? snapshot.locked_profit;
+                    // Calculate correct PnL: (winning_shares × $1) - (up_cost + down_cost)
+                    const upCost = snapshot.api_up_cost || 0;
+                    const downCost = snapshot.api_down_cost || 0;
+                    const totalCost = snapshot.total_cost || (upCost + downCost);
+                    const winner = snapshot.predicted_winning_side;
+                    
+                    let winningShares = 0;
+                    if (winner === 'UP') {
+                      winningShares = snapshot.api_up_qty;
+                    } else if (winner === 'DOWN') {
+                      winningShares = snapshot.api_down_qty;
+                    }
+                    
+                    // PnL = (winning_shares × $1) - total_cost
+                    const pnl = winner 
+                      ? (winningShares * 1.0) - totalCost
+                      : snapshot.predicted_pnl || 0;
+                    
+                    const isProfitable = pnl > 0;
 
                     return (
                       <TableRow key={snapshot.id}>
@@ -190,13 +212,35 @@ export function V35ExpirySnapshots() {
                         <TableCell className="text-right font-mono">
                           {snapshot.api_down_qty.toFixed(1)}
                         </TableCell>
-                        <TableCell className="text-right font-mono">
-                          {snapshot.paired.toFixed(0)}
+                        <TableCell className="text-right font-mono text-emerald-500">
+                          ${upCost.toFixed(2)}
                         </TableCell>
-                        <TableCell className={`text-right font-mono ${isProfitable ? "text-primary" : "text-destructive"}`}>
-                          ${snapshot.combined_cost.toFixed(4)}
+                        <TableCell className="text-right font-mono text-rose-500">
+                          ${downCost.toFixed(2)}
                         </TableCell>
-                        <TableCell className={`text-right font-mono font-bold ${pnl >= 0 ? "text-primary" : "text-destructive"}`}>
+                        <TableCell className="text-right font-mono font-medium">
+                          ${totalCost.toFixed(2)}
+                        </TableCell>
+                        <TableCell>
+                          {winner ? (
+                            <Badge 
+                              variant="outline" 
+                              className={winner === 'UP' 
+                                ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/30' 
+                                : 'bg-rose-500/10 text-rose-600 border-rose-500/30'}
+                            >
+                              {winner === 'UP' ? (
+                                <TrendingUp className="h-3 w-3 mr-1" />
+                              ) : (
+                                <AlertTriangle className="h-3 w-3 mr-1" />
+                              )}
+                              {winner} ({winningShares.toFixed(0)}×$1)
+                            </Badge>
+                          ) : (
+                            <Badge variant="secondary">Unknown</Badge>
+                          )}
+                        </TableCell>
+                        <TableCell className={`text-right font-mono font-bold ${isProfitable ? "text-primary" : "text-destructive"}`}>
                           {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
                         </TableCell>
                         <TableCell>
@@ -208,10 +252,10 @@ export function V35ExpirySnapshots() {
                           ) : isProfitable ? (
                             <Badge className="flex items-center gap-1 w-fit bg-primary text-primary-foreground">
                               <TrendingUp className="h-3 w-3" />
-                              +{profitPct}%
+                              Profit
                             </Badge>
                           ) : (
-                            <Badge variant="secondary">Break-even</Badge>
+                            <Badge variant="destructive">Loss</Badge>
                           )}
                         </TableCell>
                         <TableCell>
@@ -250,7 +294,7 @@ export function V35ExpirySnapshots() {
             <V35ImbalanceChart
               fills={marketFills}
               marketSlug={selectedMarket?.market_slug || ""}
-              winner={selectedMarket?.winner as 'UP' | 'DOWN' | undefined}
+              winner={selectedMarket?.predicted_winning_side as 'UP' | 'DOWN' | undefined}
             />
           ) : (
             <div className="py-8 text-center text-muted-foreground">
@@ -259,30 +303,49 @@ export function V35ExpirySnapshots() {
           )}
           
           {/* Quick stats for selected market */}
-          {selectedMarket && (
-            <div className="mt-4 grid grid-cols-4 gap-3 text-sm">
-              <div className="bg-muted/50 rounded-lg p-3">
-                <div className="text-muted-foreground text-xs">UP Shares</div>
-                <div className="font-bold text-primary">{selectedMarket.api_up_qty.toFixed(1)}</div>
-              </div>
-              <div className="bg-muted/50 rounded-lg p-3">
-                <div className="text-muted-foreground text-xs">DOWN Shares</div>
-                <div className="font-bold text-destructive">{selectedMarket.api_down_qty.toFixed(1)}</div>
-              </div>
-              <div className="bg-muted/50 rounded-lg p-3">
-                <div className="text-muted-foreground text-xs">Unpaired</div>
-                <div className={`font-bold ${selectedMarket.unpaired > 50 ? "text-destructive" : "text-warning"}`}>
-                  {selectedMarket.unpaired.toFixed(1)}
+          {selectedMarket && (() => {
+            const upCost = selectedMarket.api_up_cost || 0;
+            const downCost = selectedMarket.api_down_cost || 0;
+            const totalCost = selectedMarket.total_cost || (upCost + downCost);
+            const winner = selectedMarket.predicted_winning_side;
+            const winningShares = winner === 'UP' ? selectedMarket.api_up_qty : 
+                                  winner === 'DOWN' ? selectedMarket.api_down_qty : 0;
+            const pnl = winner ? (winningShares * 1.0) - totalCost : selectedMarket.predicted_pnl || 0;
+            
+            return (
+              <div className="mt-4 grid grid-cols-5 gap-3 text-sm">
+                <div className="bg-muted/50 rounded-lg p-3">
+                  <div className="text-muted-foreground text-xs">UP Shares</div>
+                  <div className="font-bold text-primary">{selectedMarket.api_up_qty.toFixed(1)}</div>
+                  <div className="text-muted-foreground text-xs">Cost: ${upCost.toFixed(2)}</div>
+                </div>
+                <div className="bg-muted/50 rounded-lg p-3">
+                  <div className="text-muted-foreground text-xs">DOWN Shares</div>
+                  <div className="font-bold text-destructive">{selectedMarket.api_down_qty.toFixed(1)}</div>
+                  <div className="text-muted-foreground text-xs">Cost: ${downCost.toFixed(2)}</div>
+                </div>
+                <div className="bg-muted/50 rounded-lg p-3">
+                  <div className="text-muted-foreground text-xs">Total Cost</div>
+                  <div className="font-bold">${totalCost.toFixed(2)}</div>
+                </div>
+                <div className="bg-muted/50 rounded-lg p-3">
+                  <div className="text-muted-foreground text-xs">Unpaired</div>
+                  <div className={`font-bold ${selectedMarket.unpaired > 50 ? "text-destructive" : "text-warning"}`}>
+                    {selectedMarket.unpaired.toFixed(1)}
+                  </div>
+                </div>
+                <div className={`rounded-lg p-3 ${pnl >= 0 ? "bg-primary/10" : "bg-destructive/10"}`}>
+                  <div className="text-muted-foreground text-xs">P&L {winner ? `(${winner} won)` : ''}</div>
+                  <div className={`font-bold ${pnl >= 0 ? "text-primary" : "text-destructive"}`}>
+                    {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                  </div>
+                  <div className="text-muted-foreground text-[10px]">
+                    = ({winningShares.toFixed(0)} × $1) - ${totalCost.toFixed(2)}
+                  </div>
                 </div>
               </div>
-              <div className="bg-muted/50 rounded-lg p-3">
-                <div className="text-muted-foreground text-xs">P&L</div>
-                <div className={`font-bold ${(selectedMarket.pnl ?? 0) >= 0 ? "text-primary" : "text-destructive"}`}>
-                  {(selectedMarket.pnl ?? 0) >= 0 ? "+" : ""}${(selectedMarket.pnl ?? selectedMarket.locked_profit).toFixed(2)}
-                </div>
-              </div>
-            </div>
-          )}
+            );
+          })()}
         </DialogContent>
       </Dialog>
     </>
