@@ -368,12 +368,11 @@ export class PairTracker {
     const takerTokenId = expensiveSide === 'UP' ? market.upTokenId : market.downTokenId;
     
     console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
-    console.log(`[PairTracker] 🎯 PAIR ${pairId} OPENED`);
-    console.log(`[PairTracker]    TAKER: ${size} ${expensiveSide} @ ~$${expensiveAsk.toFixed(2)}¢`);
-    console.log(`[PairTracker]    MAKER: ${size} ${cheapSide} @ ~$${projectedMakerPrice.toFixed(2)}¢ (target)`);
+    console.log(`[PairTracker] 🟠 ${pairId} OPENED`);
+    console.log(`[PairTracker]    TAKER: ${size} ${expensiveSide} @ ~$${expensiveAsk.toFixed(2)} (pending)`);
+    console.log(`[PairTracker]    MAKER: ${size} ${cheapSide} @ ~$${projectedMakerPrice.toFixed(2)} (target)`);
     console.log(`[PairTracker]    TARGET CPP: $${this.config.targetCpp.toFixed(2)}`);
     console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
-    
     if (config.dryRun) {
       console.log(`[PairTracker] [DRY RUN] Would open pair`);
       return { success: false, error: 'dry_run' };
@@ -446,7 +445,7 @@ export class PairTracker {
         const filledSize = takerResult.filledSize || size;
         const filledPrice = takerResult.avgPrice || expensiveAsk;
         
-        console.log(`[PairTracker] ✅ ${pairId} TAKER FILLED: ${filledSize} @ $${filledPrice.toFixed(2)}`);
+        console.log(`[PairTracker] 🟠 ${pairId} TAKER FILLED: ${filledSize} @ $${filledPrice.toFixed(2)}`);
         
         // Log taker fill event
         logPairEvent({
@@ -571,7 +570,7 @@ export class PairTracker {
       pair.updatedAt = Date.now();
       
       console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
-      console.log(`[PairTracker] 📝 ${pair.id} MAKER PLACED`);
+      console.log(`[PairTracker] 🟠 ${pair.id} MAKER PLACED`);
       console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${pair.takerSide} @ $${takerFilledPrice.toFixed(2)} (filled)`);
       console.log(`[PairTracker]    MAKER: ${takerFilledSize} ${pair.makerSide} @ $${clampedMakerPrice.toFixed(2)} (open)`);
       console.log(`[PairTracker]    PROJECTED CPP: $${(takerFilledPrice + clampedMakerPrice).toFixed(3)}`);
@@ -676,7 +675,7 @@ export class PairTracker {
         pair.pnl = (1.0 - pair.actualCpp) * Math.min(pair.takerFilledSize || 0, fill.size);
         
         console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
-        console.log(`[PairTracker] ✅ ${pair.id} HEDGED - COMPLETE!`);
+        console.log(`[PairTracker] 🟢 ${pair.id} HEDGED - COMPLETE!`);
         console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${pair.takerSide} @ $${takerCost.toFixed(2)} (filled)`);
         console.log(`[PairTracker]    MAKER: ${fill.size} ${pair.makerSide} @ $${fill.price.toFixed(2)} (filled)`);
         console.log(`[PairTracker]    CPP: $${pair.actualCpp.toFixed(3)} | P&L: ${pair.pnl >= 0 ? '+' : ''}$${pair.pnl.toFixed(2)}`);
@@ -719,7 +718,7 @@ export class PairTracker {
         pair.pnl = (1.0 - pair.actualCpp) * Math.min(pair.takerFilledSize || 0, fill.size);
         
         console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
-        console.log(`[PairTracker] 🛑 ${pair.id} EMERGENCY HEDGED`);
+        console.log(`[PairTracker] 🔴 ${pair.id} EMERGENCY HEDGED`);
         console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${pair.takerSide} @ $${takerCost.toFixed(2)} (filled)`);
         console.log(`[PairTracker]    EMERGENCY: ${fill.size} ${pair.makerSide} @ $${fill.price.toFixed(2)} (filled)`);
         console.log(`[PairTracker]    CPP: $${pair.actualCpp.toFixed(3)} | P&L: ${pair.pnl >= 0 ? '+' : ''}$${pair.pnl.toFixed(2)}`);
