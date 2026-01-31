@@ -33,6 +33,7 @@ interface ExpirySnapshot {
 interface FillData {
   ts: number;
   side: string;
+  outcome: string;
   fill_price: number;
   fill_qty: number;
 }
@@ -70,9 +71,11 @@ export function V35ExpirySnapshots() {
 
       if (error) throw error;
       
+      // Note: In v35_fills, 'side' is already the outcome (UP/DOWN), not the trade direction
       return (data || []).map(f => ({
         ts: new Date(f.fill_ts).getTime(),
-        side: f.side,
+        side: 'BUY', // For now assume all fills are buys (position building)
+        outcome: f.side || 'UP', // side is actually UP/DOWN
         fill_price: f.price,
         fill_qty: f.size,
       })) as FillData[];
