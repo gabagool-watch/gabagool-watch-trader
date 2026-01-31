@@ -7,7 +7,8 @@ import { TrendingUp, TrendingDown, AlertTriangle, Activity, DollarSign } from 'l
 interface FillDataPoint {
   ts: number;
   time: string;
-  side: 'UP' | 'DOWN';
+  outcome: 'UP' | 'DOWN';
+  side: 'BUY' | 'SELL';
   price: number;
   size: number;
   up_shares: number;
@@ -20,7 +21,8 @@ interface FillDataPoint {
 interface V35ImbalanceChartProps {
   fills: Array<{
     ts: number;
-    side: string;
+    side: string;      // BUY or SELL
+    outcome: string;   // UP or DOWN
     fill_price: number;
     fill_qty: number;
   }>;
@@ -49,14 +51,18 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
     const data: FillDataPoint[] = [];
 
     for (const fill of sortedFills) {
-      const side = fill.side?.toUpperCase() as 'UP' | 'DOWN';
+      // Use outcome (UP/DOWN) for categorization, side (BUY/SELL) for direction
+      const outcome = (fill.outcome?.toUpperCase() || 'UP') as 'UP' | 'DOWN';
+      const side = (fill.side?.toUpperCase() || 'BUY') as 'BUY' | 'SELL';
       const price = fill.fill_price;
       const size = fill.fill_qty;
 
-      if (side === 'UP') {
+      // Only count BUY fills as adding to position
+      // SELL fills would reduce position (but we track cumulative for now)
+      if (outcome === 'UP') {
         runningUp += size;
         runningUpCost += size * price;
-      } else if (side === 'DOWN') {
+      } else if (outcome === 'DOWN') {
         runningDown += size;
         runningDownCost += size * price;
       }
@@ -70,14 +76,15 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
       data.push({
         ts: fill.ts,
         time,
+        outcome,
         side,
         price,
         size,
         up_shares: runningUp,
         down_shares: runningDown,
         unpaired: Math.abs(runningUp - runningDown),
-        up_price: side === 'UP' ? price : undefined,
-        down_price: side === 'DOWN' ? price : undefined,
+        up_price: outcome === 'UP' ? price : undefined,
+        down_price: outcome === 'DOWN' ? price : undefined,
       });
     }
 
@@ -90,14 +97,18 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
     
     const finalState = chartData[chartData.length - 1];
     const maxUnpaired = Math.max(...chartData.map(d => d.unpaired));
-    const upFills = chartData.filter(d => d.side === 'UP');
-    const downFills = chartData.filter(d => d.side === 'DOWN');
+    // Filter by outcome (UP/DOWN), not side (BUY/SELL)
+    const upFills = chartData.filter(d => d.outcome === 'UP');
+    const downFills = chartData.filter(d => d.outcome === 'DOWN');
     
-    const avgUpPrice = upFills.length > 0 
-      ? upFills.reduce((sum, f) => sum + f.price * f.size, 0) / upFills.reduce((sum, f) => sum + f.size, 0)
+    const totalUpSize = upFills.reduce((sum, f) => sum + f.size, 0);
+    const totalDownSize = downFills.reduce((sum, f) => sum + f.size, 0);
+    
+    const avgUpPrice = totalUpSize > 0 
+      ? upFills.reduce((sum, f) => sum + f.price * f.size, 0) / totalUpSize
       : 0;
-    const avgDownPrice = downFills.length > 0 
-      ? downFills.reduce((sum, f) => sum + f.price * f.size, 0) / downFills.reduce((sum, f) => sum + f.size, 0)
+    const avgDownPrice = totalDownSize > 0 
+      ? downFills.reduce((sum, f) => sum + f.price * f.size, 0) / totalDownSize
       : 0;
     
     const minUpPrice = upFills.length > 0 ? Math.min(...upFills.map(f => f.price)) : 0;
@@ -231,8 +242,8 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
                     <div className="bg-popover border rounded-lg p-3 shadow-lg text-xs">
                       <div className="font-medium mb-1">{data.time}</div>
                       <div className="flex items-center gap-2 mb-1">
-                        <Badge variant="outline" className={data.side === 'UP' ? 'bg-emerald-500/10' : 'bg-rose-500/10'}>
-                          {data.side} fill: {data.size.toFixed(1)} @ ${data.price.toFixed(2)}
+                        <Badge variant="outline" className={data.outcome === 'UP' ? 'bg-emerald-500/10' : 'bg-rose-500/10'}>
+                          {data.outcome} {data.side}: {data.size.toFixed(1)} @ ${data.price.toFixed(2)}
                         </Badge>
                       </div>
                       <div className="space-y-1 pt-1 border-t">
