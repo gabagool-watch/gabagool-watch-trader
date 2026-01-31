@@ -1,23 +1,29 @@
 // ============================================================
 // V35 USER WEBSOCKET - Authenticated Fill Tracking
 // ============================================================
-// V36.2.7 - "Accept All Fills for Active Market"
+// V36.4.1 - "STRICT ORDER ID FILTERING"
 //
 // Connects to Polymarket's authenticated User Channel to receive
 // real-time notifications when our orders are matched (filled).
 //
-// V36.2.7 CRITICAL FIX:
-// In V36, we trade only ONE market at a time. The orderId registration
-// race condition caused fills to be rejected because:
-// 1. placeOrder() is called
-// 2. Order fills IMMEDIATELY on exchange (market order)
-// 3. Fill arrives via WebSocket
-// 4. BUT registerOurOrderId() hasn't been called yet!
-// 5. Fill is REJECTED as "not ours"
+// ============================================================
+// CRITICAL V36.4.1 FIX:
+// ============================================================
+// PREVIOUS BUG: The "race-fix" logic accepted ALL fills for tokens
+// in tokenToMarketMap, even without a matching orderId. This caused
+// the bot to log fills from OTHER TRADERS in the same market!
 //
-// FIX: Accept ALL fills for tokens in our tokenToMarketMap.
-// Since we only subscribe to tokens we're actively trading,
-// any fill for those tokens is ours. PairTracker handles matching.
+// Example: External trader buys 1241 shares → logged as OUR fill
+// Result: v35_fills shows 4287 shares, but Polymarket API shows 283
+//
+// FIX: STRICT filtering - ONLY accept fills where orderId is in
+// ourOrderIds set. No exceptions. The order placement code MUST
+// register the orderId BEFORE the HTTP request returns.
+//
+// Race condition mitigation:
+// - registerOurOrderId() is called BEFORE placeOrder() HTTP call
+// - Pending orders have their IDs registered immediately
+// - Worst case: we miss a fill, but we NEVER log fake fills
 // ============================================================
 
 import WebSocket from 'ws';
@@ -35,12 +41,12 @@ let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 // Token ID to market info mapping (set by runner)
 let tokenToMarketMap: Map<string, { slug: string; side: V35Side; asset: string }> = new Map();
 
-// V36.2.7: Track order IDs for logging purposes only (not filtering)
-// In V36 single-market mode, we accept all fills for subscribed tokens
+// V36.4.1: Track order IDs for STRICT filtering (not just logging!)
+// ONLY fills with orderId in this set will be accepted
 const ourOrderIds = new Set<string>();
 let totalFillsReceived = 0;
 let ourFillsAccepted = 0;
-let unknownFillsAccepted = 0; // V36.2.7: Fills accepted without orderId match
+let foreignFillsRejected = 0; // V36.4.1: Fills rejected because orderId not ours
 
 function log(msg: string): void {
   const ts = new Date().toISOString().slice(11, 19);
@@ -204,15 +210,18 @@ function processUserEvent(data: any): void {
 /**
  * Process a trade event from the User Channel
  * 
- * CRITICAL V35.3.2: Only accept fills for orders WE placed!
- * The User Channel broadcasts ALL trades in subscribed markets.
- * Without filtering by our order IDs, we count other traders' fills.
+ * ============================================================
+ * CRITICAL V36.4.1: STRICT ORDER ID FILTERING
+ * ============================================================
+ * ONLY accept fills where the orderId is in ourOrderIds set.
+ * This prevents logging fills from other traders.
+ * 
+ * The User Channel may broadcast all market activity. We MUST
+ * filter to only our own orders to avoid corrupted fill data.
+ * ============================================================
  */
 function processTrade(data: any): void {
   totalFillsReceived++;
-  
-  // V36.2.8: Debug log ALL trade events to understand structure
-  log(`📥 Trade event #${totalFillsReceived}: ${JSON.stringify(data).slice(0, 500)}`);
   
   // Extract maker orders - these are OUR fills when we're the maker
   const makerOrders = data.maker_orders as Array<{
@@ -224,79 +233,73 @@ function processTrade(data: any): void {
   }> | undefined;
 
   // =========================================================================
-  // V36.2.8: TAKER FILL DETECTION
+  // TAKER FILL DETECTION (we placed a market/IOC order)
   // =========================================================================
-  // When WE are the taker, the trade event structure is:
-  // - taker_order_id: OUR order ID
-  // - asset_id: The token we're buying
-  // - price: Fill price
-  // - size: Fill size
-  // - maker_orders: Array of THEIR maker orders we matched against
-  // 
-  // CRITICAL: We must check taker_order_id FIRST, before checking maker_orders
-  // because a taker trade will have BOTH taker_order_id AND maker_orders!
-  // =========================================================================
-  
   const takerId = data.taker_order_id;
   const takerAssetId = data.asset_id;
   const takerPrice = parseFloat(data.price);
   const takerSize = parseFloat(data.size);
   
-  // Check if this is OUR taker fill
   if (takerId && takerAssetId) {
+    // V36.4.1: STRICT - only accept if orderId is in ourOrderIds
     const isOurTakerOrder = ourOrderIds.has(takerId);
-    const takerMarketInfo = tokenToMarketMap.get(takerAssetId);
     
-    // V36.2.8: Accept if EITHER we registered this order ID, OR it's for a token we're trading
-    if (isOurTakerOrder || takerMarketInfo) {
-      if (!isNaN(takerPrice) && !isNaN(takerSize) && takerSize > 0) {
-        const marketInfo = takerMarketInfo || tokenToMarketMap.get(takerAssetId);
+    if (isOurTakerOrder) {
+      const marketInfo = tokenToMarketMap.get(takerAssetId);
+      
+      if (marketInfo && !isNaN(takerPrice) && !isNaN(takerSize) && takerSize > 0) {
+        ourFillsAccepted++;
+        log(`🎯 TAKER FILL: ${marketInfo.side} ${takerSize.toFixed(0)} @ $${takerPrice.toFixed(2)} | orderId: ${takerId.slice(0, 8)}...`);
         
-        if (marketInfo) {
-          if (isOurTakerOrder) {
-            ourFillsAccepted++;
-            log(`🎯 TAKER FILL (known): ${marketInfo.side} ${takerSize.toFixed(0)} @ $${takerPrice.toFixed(2)} | orderId: ${takerId.slice(0, 8)}...`);
-          } else {
-            unknownFillsAccepted++;
-            log(`🎯 TAKER FILL (race-fix): ${marketInfo.side} ${takerSize.toFixed(0)} @ $${takerPrice.toFixed(2)} | orderId: ${takerId.slice(0, 8)}... (not pre-registered)`);
-          }
-          
-          if (fillCallback) {
-            const fill: V35Fill = {
-              orderId: takerId,
-              tokenId: takerAssetId,
-              side: marketInfo.side,
-              price: takerPrice,
-              size: takerSize,
-              timestamp: new Date(),
-              marketSlug: marketInfo.slug,
-              asset: marketInfo.asset,
-            };
-            fillCallback(fill);
-          }
-          
-          // IMPORTANT: Return here to avoid double-processing as maker
-          // (taker trades may also have maker_orders, but those are THEIR orders)
-          return;
+        if (fillCallback) {
+          const fill: V35Fill = {
+            orderId: takerId,
+            tokenId: takerAssetId,
+            side: marketInfo.side,
+            price: takerPrice,
+            size: takerSize,
+            timestamp: new Date(),
+            marketSlug: marketInfo.slug,
+            asset: marketInfo.asset,
+          };
+          fillCallback(fill);
         }
+        
+        // Return - we processed our taker fill
+        return;
+      }
+    } else {
+      // V36.4.1: NOT our order - reject and log (throttled)
+      foreignFillsRejected++;
+      if (foreignFillsRejected <= 5 || foreignFillsRejected % 100 === 0) {
+        log(`🚫 REJECTED foreign taker fill: ${takerSize?.toFixed(0) || '?'} shares | orderId: ${takerId.slice(0, 12)}... (total rejected: ${foreignFillsRejected})`);
       }
     }
   }
   
-  // No taker fill detected, check for maker fills
+  // =========================================================================
+  // MAKER FILL DETECTION (our limit order was matched)
+  // =========================================================================
   if (!makerOrders || makerOrders.length === 0) {
-    // No maker orders either - this trade doesn't involve us
     return;
   }
 
-  // Process each maker order that was matched
   for (const maker of makerOrders) {
     const orderId = maker.order_id;
     const assetId = maker.asset_id;
-    const marketInfo = tokenToMarketMap.get(assetId);
     
+    // V36.4.1: STRICT - only accept if orderId is in ourOrderIds
+    const isOurOrder = ourOrderIds.has(orderId);
+    
+    if (!isOurOrder) {
+      // Not our order - skip silently (don't spam logs)
+      foreignFillsRejected++;
+      continue;
+    }
+    
+    const marketInfo = tokenToMarketMap.get(assetId);
     if (!marketInfo) {
-      // Not a token we're trading - ignore
+      log(`⚠️ Our order ${orderId.slice(0, 8)}... filled but token ${assetId.slice(0, 12)}... not in market map`);
       continue;
     }
 
@@ -304,19 +307,12 @@ function processTrade(data: any): void {
     const size = parseFloat(maker.matched_amount);
 
     if (isNaN(price) || isNaN(size) || size <= 0) {
-      log(`⚠️ Invalid trade data: price=${maker.price} size=${maker.matched_amount}`);
+      log(`⚠️ Invalid trade data for our order: price=${maker.price} size=${maker.matched_amount}`);
       continue;
     }
 
-    // V36.2.7: Log whether this was a known order or not
-    const isKnownOrder = ourOrderIds.has(orderId);
-    if (isKnownOrder) {
-      ourFillsAccepted++;
-      log(`🎯 MAKER FILL (known): ${marketInfo.side} ${size.toFixed(0)} @ $${price.toFixed(2)} | orderId: ${orderId.slice(0, 8)}...`);
-    } else {
-      unknownFillsAccepted++;
-      log(`🎯 MAKER FILL (race-fix): ${marketInfo.side} ${size.toFixed(0)} @ $${price.toFixed(2)} | orderId: ${orderId.slice(0, 8)}... (not pre-registered)`);
-    }
+    ourFillsAccepted++;
+    log(`🎯 MAKER FILL: ${marketInfo.side} ${size.toFixed(0)} @ $${price.toFixed(2)} | orderId: ${orderId.slice(0, 8)}...`);
 
     if (fillCallback) {
       const fill: V35Fill = {
@@ -454,12 +450,12 @@ export function getOrderTrackingStats(): {
   trackedOrders: number;
   fillsReceived: number;
   fillsAccepted: number;
-  unknownFillsAccepted: number;
+  foreignFillsRejected: number;
 } {
   return {
     trackedOrders: ourOrderIds.size,
     fillsReceived: totalFillsReceived,
     fillsAccepted: ourFillsAccepted,
-    unknownFillsAccepted: unknownFillsAccepted,
+    foreignFillsRejected: foreignFillsRejected,
   };
 }
