@@ -59,15 +59,33 @@ export function V35ImbalanceChart({ fills, inventorySnapshots, marketSlug, winne
       const price = fill.fill_price;
       const size = fill.fill_qty;
 
-      // Only count BUY fills as adding to position
-      // SELL fills would reduce position (but we track cumulative for now)
-      if (outcome === 'UP') {
-        runningUp += size;
-        runningUpCost += size * price;
-      } else if (outcome === 'DOWN') {
-        runningDown += size;
-        runningDownCost += size * price;
+      // BUY adds to position, SELL reduces position
+      if (side === 'BUY') {
+        if (outcome === 'UP') {
+          runningUp += size;
+          runningUpCost += size * price;
+        } else if (outcome === 'DOWN') {
+          runningDown += size;
+          runningDownCost += size * price;
+        }
+      } else if (side === 'SELL') {
+        if (outcome === 'UP') {
+          runningUp -= size;
+          // Reduce cost proportionally (FIFO approximation)
+          const avgCost = runningUp > 0 ? runningUpCost / (runningUp + size) : price;
+          runningUpCost -= size * avgCost;
+          runningUpCost = Math.max(0, runningUpCost);
+        } else if (outcome === 'DOWN') {
+          runningDown -= size;
+          const avgCost = runningDown > 0 ? runningDownCost / (runningDown + size) : price;
+          runningDownCost -= size * avgCost;
+          runningDownCost = Math.max(0, runningDownCost);
+        }
       }
+
+      // Ensure non-negative shares
+      runningUp = Math.max(0, runningUp);
+      runningDown = Math.max(0, runningDown);
 
       const time = new Date(fill.ts).toLocaleTimeString('nl-NL', { 
         hour: '2-digit', 
