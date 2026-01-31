@@ -58,6 +58,11 @@ export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, grou
     // Sort by timestamp
     const sortedSnapshots = [...inventorySnapshots].sort((a, b) => a.ts - b.ts);
     
+    // Calculate the start of the 15-minute window from the first snapshot
+    const firstTs = sortedSnapshots[0].ts;
+    // Round down to nearest 15 minutes to get window start
+    const windowStartMs = Math.floor(firstTs / (15 * 60 * 1000)) * (15 * 60 * 1000);
+    
     // Track running maximum to ensure monotonic increase
     // The bot only buys, so shares should never decrease
     // Decreases in inventory_snapshots are from API reconciliation, not actual sells
@@ -73,13 +78,15 @@ export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, grou
       runningMaxUp = Math.max(runningMaxUp, rawUp);
       runningMaxDown = Math.max(runningMaxDown, rawDown);
       
+      // Calculate elapsed time within the 15-minute window
+      const elapsedMs = snapshot.ts - windowStartMs;
+      const elapsedMinutes = Math.floor(elapsedMs / 60000);
+      const elapsedSeconds = Math.floor((elapsedMs % 60000) / 1000);
+      const timeLabel = `${elapsedMinutes}:${elapsedSeconds.toString().padStart(2, '0')}`;
+      
       return {
         ts: snapshot.ts,
-        time: new Date(snapshot.ts).toLocaleTimeString('nl-NL', { 
-          hour: '2-digit', 
-          minute: '2-digit', 
-          second: '2-digit' 
-        }),
+        time: timeLabel,
         up_shares: runningMaxUp,
         down_shares: runningMaxDown,
         avg_up_cost: snapshot.avg_up_cost,
