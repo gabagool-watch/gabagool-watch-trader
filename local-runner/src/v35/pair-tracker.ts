@@ -1,7 +1,12 @@
 // ============================================================
 // V36 PAIR TRACKER - INDEPENDENT PAIR LIFECYCLE MANAGEMENT
 // ============================================================
-// Version: V36.3.6 - "Market Expiry Reset"
+// Version: V36.4.3 - "Fill Audit Fallback"
+//
+// V36.4.3 CRITICAL FIX:
+// - Early Whitelisting: Register orderId IMMEDIATELY after API response
+// - Fill Audit Fallback: Poll API for fills if WebSocket misses them
+// - This guarantees ALL fills are logged, even with WS race conditions
 //
 // V36.3.1 CRITICAL FIX:
 // - Set makerPlaced=true BEFORE async placeOrder call
@@ -21,9 +26,9 @@
 // ============================================================
 
 import type { V35Market, V35Side, V35Asset, V35Fill } from './types.js';
-import { placeOrder, cancelOrder, getOpenOrders } from '../polymarket.js';
+import { placeOrder, cancelOrder, getOpenOrders, getOrderFillInfo } from '../polymarket.js';
 import { getBinanceFeed } from './binance-feed.js';
-import { logV35GuardEvent, logPairEvent } from './backend.js';
+import { logV35GuardEvent, logPairEvent, saveV35Fill } from './backend.js';
 import { getV35Config } from './config.js';
 // CRITICAL: Register our order IDs so fills are recognized as ours!
 import { registerOurOrderId } from './user-ws.js';
@@ -522,6 +527,11 @@ export class PairTracker {
    * This is the ONLY place a maker order is created!
    * 
    * CRITICAL FIX: Set makerPlaced=true BEFORE the async call to prevent race conditions
+   * 
+   * V36.4.3 CRITICAL FIX: Early Whitelisting
+   * We must register the orderId for WebSocket IMMEDIATELY after the API response,
+   * BEFORE the slow getOrder() verification. Otherwise, if the maker fills instantly,
+   * the WebSocket will reject it as a "foreign fill" because the ID isn't whitelisted yet.
    */
   private async placeMakerOrder(
     pair: PendingPair,
@@ -572,8 +582,15 @@ export class PairTracker {
         return { success: false, error: makerResult.error || 'maker_failed' };
       }
       
-      // Register order ID for WebSocket
+      // =========================================================================
+      // V36.4.3 CRITICAL: EARLY WHITELISTING - BEFORE ANY VERIFICATION!
+      // =========================================================================
+      // Register order ID for WebSocket IMMEDIATELY after API response.
+      // This MUST happen before the slow getOrder() verification in polymarket.ts.
+      // If we wait, fast fills will be rejected as "foreign fills" by user-ws.ts.
+      // =========================================================================
       registerOurOrderId(makerResult.orderId);
+      console.log(`[PairTracker] 🔑 V36.4.3: Early-whitelisted orderId ${makerResult.orderId.slice(0, 12)}...`);
       
       // Update pair state (makerPlaced already true)
       pair.makerOrderId = makerResult.orderId;
@@ -875,6 +892,113 @@ export class PairTracker {
         }
       }
     }
+  }
+  
+  // =========================================================================
+  // V36.4.3: FILL AUDIT FALLBACK
+  // =========================================================================
+  // This method polls the API for fills on WAITING_HEDGE pairs.
+  // If a maker fill was missed by WebSocket, we detect and persist it here.
+  // =========================================================================
+  
+  async auditMakerFills(market: V35Market): Promise<{ audited: number; found: number }> {
+    const now = Date.now();
+    const AUDIT_DELAY_MS = 5_000; // Wait 5s before auditing (give WS time first)
+    
+    let audited = 0;
+    let found = 0;
+    
+    for (const pair of this.pairs.values()) {
+      // Only audit WAITING_HEDGE pairs with a maker order
+      if (pair.status !== 'WAITING_HEDGE') continue;
+      if (pair.marketSlug !== market.slug) continue;
+      if (!pair.makerOrderId) continue;
+      
+      // Wait at least AUDIT_DELAY_MS since maker was placed
+      const timeSincePlaced = now - pair.updatedAt;
+      if (timeSincePlaced < AUDIT_DELAY_MS) continue;
+      
+      audited++;
+      
+      try {
+        const fillInfo = await getOrderFillInfo(pair.makerOrderId);
+        
+        if (!fillInfo.success) {
+          console.log(`[PairTracker] 🔍 Audit ${pair.id}: API check failed: ${fillInfo.error}`);
+          continue;
+        }
+        
+        if (fillInfo.status === 'filled' || fillInfo.status === 'partial') {
+          const filledSize = fillInfo.filledSize || 0;
+          
+          if (filledSize > 0) {
+            found++;
+            console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+            console.log(`[PairTracker] 🔔 V36.4.3 AUDIT FOUND MISSED FILL!`);
+            console.log(`[PairTracker]    Pair: ${pair.id}`);
+            console.log(`[PairTracker]    Order: ${pair.makerOrderId.slice(0, 12)}...`);
+            console.log(`[PairTracker]    Size: ${filledSize} (original: ${fillInfo.originalSize})`);
+            console.log(`[PairTracker]    Status: ${fillInfo.status}`);
+            console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
+            
+            // Update pair status
+            pair.makerFilledAt = now;
+            pair.makerFilledPrice = pair.makerPrice;
+            pair.makerFilledSize = filledSize;
+            pair.status = 'HEDGED';
+            pair.updatedAt = now;
+            
+            // Calculate CPP and PnL
+            const takerCost = pair.takerFilledPrice || pair.takerPrice;
+            pair.actualCpp = takerCost + pair.makerPrice;
+            pair.pnl = (1.0 - pair.actualCpp) * Math.min(pair.takerFilledSize || 0, filledSize);
+            
+            // Persist fill to database (WebSocket missed it)
+            const fill: V35Fill = {
+              orderId: pair.makerOrderId,
+              tokenId: pair.makerSide === 'UP' ? market.upTokenId : market.downTokenId,
+              side: pair.makerSide,
+              price: pair.makerPrice,
+              size: filledSize,
+              timestamp: new Date(),
+              marketSlug: market.slug,
+              asset: market.asset,
+            };
+            
+            saveV35Fill(fill).catch((err) => {
+              console.error(`[PairTracker] Failed to save audited fill:`, err);
+            });
+            
+            // Log pair event
+            logPairEvent({
+              pairId: pair.id,
+              eventType: 'pair_hedged',
+              marketSlug: market.slug,
+              asset: market.asset,
+              takerSide: pair.takerSide,
+              takerPrice: pair.takerFilledPrice || pair.takerPrice,
+              takerSize: pair.takerFilledSize || pair.takerSize,
+              makerSide: pair.makerSide,
+              makerPrice: pair.makerPrice,
+              makerSize: filledSize,
+              fillPrice: pair.makerPrice,
+              fillSize: filledSize,
+              cpp: pair.actualCpp,
+              pnl: pair.pnl,
+              status: 'HEDGED_VIA_AUDIT',
+            }).catch(() => {});
+          }
+        }
+      } catch (err: any) {
+        console.error(`[PairTracker] Audit error for ${pair.id}:`, err?.message);
+      }
+    }
+    
+    if (audited > 0) {
+      console.log(`[PairTracker] 🔍 Audited ${audited} WAITING_HEDGE pairs, found ${found} missed fills`);
+    }
+    
+    return { audited, found };
   }
   
   /**
