@@ -73,7 +73,9 @@ type Action =
   | 'save-v35-position'
   | 'save-v35-settlement'
   // V35 Expiry Snapshots (precise end-of-market archiving)
-  | 'save-v35-expiry-snapshot';
+  | 'save-v35-expiry-snapshot'
+  // V35 Price Ticks (spot price logging for crossing analysis)
+  | 'save-v35-price-tick';
 
 interface RequestBody {
   action: Action;
@@ -2368,6 +2370,10 @@ Deno.serve(async (req) => {
           predicted_winning_side: snapshot.predicted_winning_side,
           predicted_final_value: snapshot.predicted_final_value,
           predicted_pnl: snapshot.predicted_pnl,
+          // NEW: Crossing analysis
+          crossing_count: snapshot.crossing_count,
+          spot_price: snapshot.spot_price,
+          strike_price: snapshot.strike_price,
         }, { onConflict: 'market_slug' });
 
         if (error) {
@@ -2383,6 +2389,40 @@ Deno.serve(async (req) => {
           ? `PnL=$${Number(snapshot.predicted_pnl) >= 0 ? '+' : ''}${Number(snapshot.predicted_pnl).toFixed(2)}`
           : `CPP=$${snapshot.combined_cost}`;
         console.log(`[runner-proxy] 📸 Saved V35 expiry snapshot: ${snapshot.market_slug} (${snapshot.predicted_winning_side ?? 'TBD'} wins, ${pnlStr})`);
+        return new Response(JSON.stringify({ success: true }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // ============================================================
+      // V35 PRICE TICKS (Spot price logging for crossing analysis)
+      // ============================================================
+      case 'save-v35-price-tick': {
+        const tick = data?.tick as { asset: string; price: number; ts: number } | undefined;
+        if (!tick || !tick.asset || !tick.price || !tick.ts) {
+          return new Response(JSON.stringify({ success: false, error: 'Missing tick data' }), {
+            status: 400,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        const { error } = await supabase.from('price_ticks').insert({
+          asset: tick.asset,
+          price: tick.price,
+          ts: tick.ts,
+          source: 'binance',
+        });
+
+        if (error) {
+          // Silent fail - we log many ticks, don't spam errors
+          // console.error('[runner-proxy] save-v35-price-tick error:', error);
+          return new Response(JSON.stringify({ success: false, error: error.message }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        // Don't log individual ticks - too noisy
         return new Response(JSON.stringify({ success: true }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });

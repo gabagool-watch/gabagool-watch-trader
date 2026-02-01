@@ -6659,6 +6659,7 @@ export type Database = {
           combined_ask: number | null
           combined_cost: number | null
           created_at: string
+          crossing_count: number | null
           down_best_ask: number | null
           down_best_bid: number | null
           down_orders_count: number | null
@@ -6677,6 +6678,8 @@ export type Database = {
           predicted_winning_side: string | null
           seconds_before_expiry: number | null
           snapshot_time: string
+          spot_price: number | null
+          strike_price: number | null
           total_cost: number | null
           unpaired: number
           up_best_ask: number | null
@@ -6695,6 +6698,7 @@ export type Database = {
           combined_ask?: number | null
           combined_cost?: number | null
           created_at?: string
+          crossing_count?: number | null
           down_best_ask?: number | null
           down_best_bid?: number | null
           down_orders_count?: number | null
@@ -6713,6 +6717,8 @@ export type Database = {
           predicted_winning_side?: string | null
           seconds_before_expiry?: number | null
           snapshot_time: string
+          spot_price?: number | null
+          strike_price?: number | null
           total_cost?: number | null
           unpaired?: number
           up_best_ask?: number | null
@@ -6731,6 +6737,7 @@ export type Database = {
           combined_ask?: number | null
           combined_cost?: number | null
           created_at?: string
+          crossing_count?: number | null
           down_best_ask?: number | null
           down_best_bid?: number | null
           down_orders_count?: number | null
@@ -6749,6 +6756,8 @@ export type Database = {
           predicted_winning_side?: string | null
           seconds_before_expiry?: number | null
           snapshot_time?: string
+          spot_price?: number | null
+          strike_price?: number | null
           total_cost?: number | null
           unpaired?: number
           up_best_ask?: number | null
