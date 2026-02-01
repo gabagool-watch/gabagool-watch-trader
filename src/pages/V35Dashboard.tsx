@@ -11,7 +11,7 @@ import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { V35LogViewer, V35FillsTable, V35ExportButton, V35StrategyPDFExport, V35OpenPositions, V35LivePriceHeader, V35DecisionLog, V35ExpirySnapshots, V35MarketPnLTable, V35PairLog } from '@/components/v35';
+import { V35LogViewer, V35FillsTable, V35ExportButton, V35StrategyPDFExport, V35OpenPositions, V35LivePriceHeader, V35DecisionLog, V35ExpirySnapshots, V35MarketPnLTable, V35PairLog, V35PairFillTimeTable } from '@/components/v35';
 import { toast } from 'sonner';
 import { 
   Activity, 
@@ -392,7 +392,10 @@ export default function V35Dashboard() {
           )}
 
           <TabsContent value="pairs">
-            <V35PairLog />
+            <div className="space-y-6">
+              <V35PairLog />
+              <V35PairFillTimeTable />
+            </div>
           </TabsContent>
 
           <TabsContent value="pnl">
