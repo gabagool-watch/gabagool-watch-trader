@@ -28,6 +28,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { useEffect, useState } from 'react';
 import { V35FillTimeline } from './V35FillTimeline';
+import { V35MarketPriceChart } from './V35MarketPriceChart';
 
 // =========================================================================
 // STRATEGY LIMITS (must match local-runner/src/v35/config.ts V35.4.5)
@@ -753,6 +754,18 @@ export function V35OpenPositions() {
                       );
                     })()}
                   </div>
+                  
+                  {/* Price Chart - shows asset price vs strike */}
+                  {timeInfo && (
+                    <div className="px-4 py-3 bg-muted/10 border-t border-border/50">
+                      <V35MarketPriceChart 
+                        asset={pos.asset}
+                        marketSlug={pos.market_slug}
+                        startTs={timeInfo.startTs}
+                        endTs={timeInfo.endTs}
+                      />
+                    </div>
+                  )}
                   
                   {/* Timeline for LIVE markets */}
                   {timeInfo?.isLive && (
