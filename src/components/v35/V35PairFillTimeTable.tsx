@@ -5,6 +5,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { supabase } from '@/integrations/supabase/client';
 import { Timer, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { ChartContainer, ChartTooltip, ChartTooltipContent } from '@/components/ui/chart';
+import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell } from 'recharts';
 
 interface PairTiming {
   pairId: string;
@@ -222,6 +224,40 @@ export function V35PairFillTimeTable() {
             <div className="text-amber-400 font-bold">{formatTime(stats.maxFillTime)}</div>
           </div>
         </div>
+        {/* Histogram Chart */}
+        {timeBuckets.length > 0 && (
+          <div className="h-48">
+            <ChartContainer config={{
+              count: { label: "Count", color: "hsl(var(--primary))" }
+            }}>
+              <BarChart data={timeBuckets} margin={{ top: 10, right: 10, left: 0, bottom: 20 }}>
+                <XAxis 
+                  dataKey="range" 
+                  tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+                  axisLine={{ stroke: 'hsl(var(--border))' }}
+                  tickLine={{ stroke: 'hsl(var(--border))' }}
+                />
+                <YAxis 
+                  tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+                  axisLine={{ stroke: 'hsl(var(--border))' }}
+                  tickLine={{ stroke: 'hsl(var(--border))' }}
+                />
+                <ChartTooltip content={<ChartTooltipContent />} />
+                <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                  {timeBuckets.map((entry, index) => (
+                    <Cell 
+                      key={`cell-${index}`} 
+                      fill={entry.range.includes('s') && !entry.range.includes('m') && parseInt(entry.range) <= 3 
+                        ? 'hsl(var(--chart-2))' 
+                        : 'hsl(var(--primary))'
+                      } 
+                    />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ChartContainer>
+          </div>
+        )}
         
         {/* Time distribution table */}
         <Table>
