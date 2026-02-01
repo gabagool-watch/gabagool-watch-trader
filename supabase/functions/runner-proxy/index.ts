@@ -2395,27 +2395,72 @@ Deno.serve(async (req) => {
       }
 
       // ============================================================
-      // V35 PRICE TICKS (Spot price logging for crossing analysis)
+      // V35 PRICE TICKS (Spot + Share prices logging for price chart)
       // ============================================================
       case 'save-v35-price-tick': {
-        const tick = data?.tick as { asset: string; price: number; ts: number } | undefined;
-        if (!tick || !tick.asset || !tick.price || !tick.ts) {
-          return new Response(JSON.stringify({ success: false, error: 'Missing tick data' }), {
+        // Supports single tick or batch of ticks
+        const singleTick = data?.tick as {
+          market_slug: string;
+          asset: string;
+          ts: number;
+          spot_price: number;
+          up_best_bid?: number;
+          up_best_ask?: number;
+          down_best_bid?: number;
+          down_best_ask?: number;
+          strike_price?: number;
+          run_id?: string;
+        } | undefined;
+
+        const ticksBatch = data?.ticks as Array<{
+          market_slug: string;
+          asset: string;
+          ts: number;
+          spot_price: number;
+          up_best_bid?: number;
+          up_best_ask?: number;
+          down_best_bid?: number;
+          down_best_ask?: number;
+          strike_price?: number;
+          run_id?: string;
+        }> | undefined;
+
+        const ticks = ticksBatch ?? (singleTick ? [singleTick] : []);
+
+        if (ticks.length === 0) {
+          return new Response(JSON.stringify({ success: false, error: 'Missing tick(s) data' }), {
             status: 400,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
           });
         }
 
-        const { error } = await supabase.from('price_ticks').insert({
-          asset: tick.asset,
-          price: tick.price,
-          ts: tick.ts,
-          source: 'binance',
-        });
+        // Validate each tick
+        for (const t of ticks) {
+          if (!t.market_slug || !t.asset || !t.ts || t.spot_price === undefined) {
+            return new Response(JSON.stringify({ success: false, error: 'Invalid tick: missing required fields' }), {
+              status: 400,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            });
+          }
+        }
+
+        const rows = ticks.map((t) => ({
+          market_slug: t.market_slug,
+          asset: t.asset,
+          ts: t.ts,
+          spot_price: t.spot_price,
+          up_best_bid: t.up_best_bid ?? null,
+          up_best_ask: t.up_best_ask ?? null,
+          down_best_bid: t.down_best_bid ?? null,
+          down_best_ask: t.down_best_ask ?? null,
+          strike_price: t.strike_price ?? null,
+          run_id: t.run_id ?? null,
+        }));
+
+        const { error } = await supabase.from('v35_price_ticks').insert(rows);
 
         if (error) {
-          // Silent fail - we log many ticks, don't spam errors
-          // console.error('[runner-proxy] save-v35-price-tick error:', error);
+          console.error('[runner-proxy] save-v35-price-tick error:', error.message);
           return new Response(JSON.stringify({ success: false, error: error.message }), {
             status: 500,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -2423,7 +2468,7 @@ Deno.serve(async (req) => {
         }
 
         // Don't log individual ticks - too noisy
-        return new Response(JSON.stringify({ success: true }), {
+        return new Response(JSON.stringify({ success: true, count: rows.length }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
