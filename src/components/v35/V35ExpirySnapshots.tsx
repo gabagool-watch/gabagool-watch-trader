@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { format } from "date-fns";
 import { Camera, TrendingUp, AlertTriangle, LineChart } from "lucide-react";
 import { V35ImbalanceChart } from "./V35ImbalanceChart";
+import { V35MarketPriceChart } from "./V35MarketPriceChart";
 
 interface ExpirySnapshot {
   id: string;
@@ -285,6 +286,18 @@ export function V35ExpirySnapshots() {
             </DialogTitle>
           </DialogHeader>
           
+          {/* Market Price Chart - shows price movement relative to strike */}
+          {selectedMarket && (
+            <div className="mb-4">
+              <V35MarketPriceChart
+                asset={selectedMarket.asset}
+                marketSlug={selectedMarket.market_slug}
+                startTs={new Date(selectedMarket.expiry_time).getTime() - 15 * 60 * 1000}
+                endTs={new Date(selectedMarket.expiry_time).getTime()}
+              />
+            </div>
+          )}
+
           {inventoryLoading ? (
             <div className="py-8 text-center text-muted-foreground">Loading position timeline...</div>
           ) : inventorySnapshots && inventorySnapshots.length > 0 ? (
