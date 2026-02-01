@@ -9,6 +9,7 @@
 import type { V35Market, V35MarketMetrics, V35Asset } from './types.js';
 import { calculateMarketMetrics } from './types.js';
 import { getCachedPosition } from '../position-cache.js';
+import { getBinanceFeed } from './binance-feed.js';
 
 // ============================================================
 // TYPES
@@ -67,6 +68,11 @@ export interface V35ExpirySnapshot {
   // State flags
   wasImbalanced: boolean;
   imbalanceRatio: number | null;
+  
+  // Price crossing analysis
+  crossingCount: number | null;   // How many times spot crossed strike
+  spotPrice: number | null;       // Spot price at snapshot time
+  strikePrice: number | null;     // Strike price from market slug
 }
 
 // ============================================================
@@ -221,6 +227,46 @@ function captureSnapshot(market: V35Market): void {
     ? market.upBestAsk + market.downBestAsk
     : null;
   
+  // ============================================================
+  // CROSSING ANALYSIS - How many times did spot cross strike?
+  // ============================================================
+  const binanceFeed = getBinanceFeed();
+  const currentSpotPrice = binanceFeed.getPrice(market.asset);
+  
+  // Parse strike price from market slug (e.g., "btc-updown-15m-1769865300" -> last 10 digits is expiry, strike is in slug too)
+  // Strike format varies - try to extract from slug or use a default based on asset
+  let strikePrice: number | null = null;
+  
+  // Try to parse strike from market slug format
+  // Common formats: "btc-updown-97500-15m-..." or check if numeric values exist
+  const slugParts = market.slug.split('-');
+  for (const part of slugParts) {
+    const numVal = parseFloat(part);
+    // Strike prices are typically: BTC 90000-110000, ETH 3000-4000, SOL 150-250, XRP 2-4
+    if (!isNaN(numVal)) {
+      if (market.asset === 'BTC' && numVal >= 50000 && numVal <= 200000) {
+        strikePrice = numVal;
+        break;
+      } else if (market.asset === 'ETH' && numVal >= 2000 && numVal <= 10000) {
+        strikePrice = numVal;
+        break;
+      } else if (market.asset === 'SOL' && numVal >= 50 && numVal <= 500) {
+        strikePrice = numVal;
+        break;
+      } else if (market.asset === 'XRP' && numVal >= 0.5 && numVal <= 10) {
+        strikePrice = numVal;
+        break;
+      }
+    }
+  }
+  
+  // Calculate crossings if we have a valid strike price
+  let crossingCount: number | null = null;
+  if (strikePrice !== null) {
+    const crossingResult = binanceFeed.countStrikeCrossings(market.asset, strikePrice, 15 * 60 * 1000);
+    crossingCount = crossingResult.crossingCount;
+  }
+  
   const snapshot: V35ExpirySnapshot = {
     marketSlug: market.slug,
     asset: market.asset,
@@ -270,18 +316,27 @@ function captureSnapshot(market: V35Market): void {
     // Flags
     wasImbalanced: unpaired >= 10,
     imbalanceRatio,
+    
+    // Price crossing analysis
+    crossingCount,
+    spotPrice: currentSpotPrice > 0 ? currentSpotPrice : null,
+    strikePrice,
   };
   
-  // Log summary with CORRECT PnL
+  // Log summary with CORRECT PnL and crossing info
   const pnlEmoji = predictedPnl >= 0 ? '✅' : '❌';
   const winnerStr = predictedWinningSide ?? 'UNKNOWN';
+  const crossingStr = crossingCount !== null ? ` | 🔄 ${crossingCount} crossings` : '';
   console.log(`📸 [ExpirySnapshot] ${market.slug.slice(-25)}:`);
   console.log(`   📊 Position: UP=${apiUpQty.toFixed(1)} ($${apiUpCost.toFixed(2)}) | DOWN=${apiDownQty.toFixed(1)} ($${apiDownCost.toFixed(2)})`);
   console.log(`   💰 Total Cost: $${totalCost.toFixed(2)}`);
-  console.log(`   🎯 Predicted Winner: ${winnerStr} → Value: $${predictedFinalValue.toFixed(2)}`);
+  console.log(`   🎯 Predicted Winner: ${winnerStr} → Value: $${predictedFinalValue.toFixed(2)}${crossingStr}`);
   console.log(`   ${pnlEmoji} Predicted PnL: $${predictedPnl >= 0 ? '+' : ''}${predictedPnl.toFixed(2)}`);
   if (unpaired >= 5) {
     console.log(`   ⚠️ Unpaired: ${unpaired.toFixed(1)} shares (ratio: ${imbalanceRatio?.toFixed(1) ?? 'N/A'}:1)`);
+  }
+  if (crossingCount !== null && crossingCount >= 3) {
+    console.log(`   🚨 HIGH REVERSAL RISK: ${crossingCount} crossings detected!`);
   }
   
   // Call the callback to persist

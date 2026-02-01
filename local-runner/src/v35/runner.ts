@@ -62,7 +62,7 @@ import { getHedgeManager, resetHedgeManager } from './hedge-manager.js';
 import { getCircuitBreaker, initCircuitBreaker, resetCircuitBreaker } from './circuit-breaker.js';
 import { getProactiveRebalancer, resetProactiveRebalancer } from './proactive-rebalancer.js';
 import { getEmergencyRecovery, resetEmergencyRecovery, analyzeRecovery, setRecoveryConfig } from './emergency-recovery.js';
-import { sendV35Heartbeat, sendV35Offline, saveV35Settlement, saveV35Fill, saveV35OrderbookSnapshots, saveV35InventorySnapshot, saveV35ExpirySnapshot, type V35InventorySnapshot, type V35ExpirySnapshotData } from './backend.js';
+import { sendV35Heartbeat, sendV35Offline, saveV35Settlement, saveV35Fill, saveV35OrderbookSnapshots, saveV35InventorySnapshot, saveV35ExpirySnapshot, saveV35PriceTick, type V35InventorySnapshot, type V35ExpirySnapshotData } from './backend.js';
 import type { V35OrderbookSnapshot } from './types.js';
 // V36: Import new depth-aware modules
 import { getV36QuotingEngine, resetV36QuotingEngine } from './v36-quoting-engine.js';
@@ -77,7 +77,7 @@ import { ensureValidCredentials, getBalance, getOpenOrders } from '../polymarket
 import { checkVpnRequired } from '../vpn-check.js';
 import { acquireLeaseOrHalt, releaseLease, renewLease } from '../runner-lease.js';
 import { setRunnerIdentity } from '../order-guard.js';
-import { startBinanceFeed, stopBinanceFeed, getBinanceFeed } from './binance-feed.js';
+import { startBinanceFeed, stopBinanceFeed, getBinanceFeed, setPriceTickCallback } from './binance-feed.js';
 import { startUserWebSocket, stopUserWebSocket, setTokenToMarketMap, isUserWsConnected, clearOrderIds, getOrderTrackingStats, registerOurOrderIds } from './user-ws.js';
 // CRITICAL: Position cache for real-time position sync from Polymarket API
 import { 
@@ -1361,6 +1361,10 @@ async function main(): Promise<void> {
       predictedWinningSide: snapshot.predictedWinningSide,
       predictedFinalValue: snapshot.predictedFinalValue,
       predictedPnl: snapshot.predictedPnl,
+      // NEW: Crossing analysis
+      crossingCount: snapshot.crossingCount,
+      spotPrice: snapshot.spotPrice,
+      strikePrice: snapshot.strikePrice,
     };
     saveV35ExpirySnapshot(snapshotData).catch(err => {
       logError('Failed to save expiry snapshot:', err);
@@ -1386,6 +1390,16 @@ async function main(): Promise<void> {
   // Start Binance price feed for momentum detection
   if (config.enableMomentumFilter) {
     log('📊 Starting Binance price feed for momentum detection...');
+    
+    // V36.4.5: Register price tick callback to log spot prices to database
+    // This enables crossing analysis for expiry snapshots
+    setPriceTickCallback(async (asset, price, ts) => {
+      saveV35PriceTick(asset, price, ts).catch(() => {
+        // Silent fail - we log many ticks, don't spam errors
+      });
+    });
+    log('📊 Price tick logging enabled (every 5s per asset)');
+    
     startBinanceFeed();
     // Give it a moment to connect
     await sleep(2000);

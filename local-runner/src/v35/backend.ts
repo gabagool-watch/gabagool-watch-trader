@@ -426,6 +426,10 @@ export interface V35ExpirySnapshotData {
   predictedWinningSide: 'UP' | 'DOWN' | null;
   predictedFinalValue: number;
   predictedPnl: number;
+  // NEW: Crossing analysis
+  crossingCount: number | null;
+  spotPrice: number | null;
+  strikePrice: number | null;
 }
 
 export async function saveV35ExpirySnapshot(data: V35ExpirySnapshotData): Promise<boolean> {
@@ -465,6 +469,10 @@ export async function saveV35ExpirySnapshot(data: V35ExpirySnapshotData): Promis
         predicted_winning_side: data.predictedWinningSide,
         predicted_final_value: data.predictedFinalValue,
         predicted_pnl: data.predictedPnl,
+        // NEW: Crossing analysis
+        crossing_count: data.crossingCount,
+        spot_price: data.spotPrice,
+        strike_price: data.strikePrice,
       },
     });
     return result.success;
@@ -483,5 +491,25 @@ export async function sendV35Offline(runnerId: string): Promise<void> {
     await callProxy('offline', { runner_id: runnerId });
   } catch (err: any) {
     console.error('[V35Backend] Offline notification failed:', err?.message);
+  }
+}
+
+// ============================================================
+// PRICE TICK LOGGING
+// ============================================================
+
+export async function saveV35PriceTick(asset: string, price: number, ts: number): Promise<boolean> {
+  try {
+    const result = await callProxy<{ success: boolean }>('save-v35-price-tick', {
+      tick: {
+        asset,
+        price,
+        ts,
+      },
+    });
+    return result.success;
+  } catch (err: any) {
+    // Silent fail - we log many ticks, don't spam errors
+    return false;
   }
 }

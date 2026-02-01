@@ -38,11 +38,19 @@ const ASSET_FROM_SYMBOL: Record<string, V35Asset> = {
   XRPUSDT: 'XRP',
 };
 
+// Callback for price tick logging
+type PriceTickCallback = (asset: V35Asset, price: number, ts: number) => void;
+let priceTickCallback: PriceTickCallback | null = null;
+
+export function setPriceTickCallback(callback: PriceTickCallback): void {
+  priceTickCallback = callback;
+}
+
 export class BinancePriceFeed {
   private ws: WebSocket | null = null;
   private running = false;
   
-  // Price history per asset (last 60 seconds)
+  // Price history per asset (last 15 minutes for crossing analysis)
   private priceHistory: Map<V35Asset, PricePoint[]> = new Map();
   
   // Current momentum state per asset
@@ -52,12 +60,17 @@ export class BinancePriceFeed {
   private lookbackSeconds = 30; // Look back 30 seconds for momentum
   private momentumThreshold = 0.15; // 0.15% = trending
   private strongMomentumThreshold = 0.30; // 0.30% = strongly trending
-  private historyMaxLength = 120; // Keep 2 minutes of history
+  private historyMaxLength = 900; // Keep 15 minutes of history (900 seconds)
+  
+  // Throttle DB writes - save every 5 seconds per asset
+  private lastDbWrite: Map<V35Asset, number> = new Map();
+  private DB_WRITE_INTERVAL_MS = 5000;
   
   constructor() {
     // Initialize maps
     for (const asset of Object.keys(SYMBOL_MAP) as V35Asset[]) {
       this.priceHistory.set(asset, []);
+      this.lastDbWrite.set(asset, 0);
       this.momentum.set(asset, {
         currentPrice: 0,
         momentum: 0,
@@ -139,13 +152,20 @@ export class BinancePriceFeed {
     const history = this.priceHistory.get(asset) || [];
     history.push({ price, time: now });
     
-    // Trim old data (keep last 2 minutes)
+    // Trim old data (keep last 15 minutes)
     const cutoff = now - this.historyMaxLength * 1000;
     while (history.length > 0 && history[0].time < cutoff) {
       history.shift();
     }
     
     this.priceHistory.set(asset, history);
+    
+    // Log to database (throttled to every 5 seconds per asset)
+    const lastWrite = this.lastDbWrite.get(asset) || 0;
+    if (priceTickCallback && now - lastWrite >= this.DB_WRITE_INTERVAL_MS) {
+      this.lastDbWrite.set(asset, now);
+      priceTickCallback(asset, price, now);
+    }
     
     // Update momentum calculation
     this.calculateMomentum(asset);
@@ -303,6 +323,59 @@ export class BinancePriceFeed {
       }
     }
     return false;
+  }
+  
+  /**
+   * Count how many times price crossed strike price in the last N seconds
+   * @param asset Asset to check
+   * @param strikePrice The strike price to check crossings against
+   * @param windowMs Lookback window in milliseconds (default: 15 minutes)
+   * @returns Object with crossing count and prices
+   */
+  countStrikeCrossings(asset: V35Asset, strikePrice: number, windowMs: number = 15 * 60 * 1000): { 
+    crossingCount: number; 
+    startPrice: number | null;
+    endPrice: number | null;
+    minPrice: number | null;
+    maxPrice: number | null;
+  } {
+    const history = this.priceHistory.get(asset) || [];
+    const now = Date.now();
+    const cutoff = now - windowMs;
+    
+    // Filter to window
+    const windowPrices = history.filter(p => p.time >= cutoff);
+    
+    if (windowPrices.length < 2) {
+      return { crossingCount: 0, startPrice: null, endPrice: null, minPrice: null, maxPrice: null };
+    }
+    
+    let crossingCount = 0;
+    let minPrice = windowPrices[0].price;
+    let maxPrice = windowPrices[0].price;
+    let prevAboveStrike = windowPrices[0].price > strikePrice;
+    
+    for (let i = 1; i < windowPrices.length; i++) {
+      const price = windowPrices[i].price;
+      const aboveStrike = price > strikePrice;
+      
+      // Count crossing when we transition above/below strike
+      if (aboveStrike !== prevAboveStrike) {
+        crossingCount++;
+        prevAboveStrike = aboveStrike;
+      }
+      
+      minPrice = Math.min(minPrice, price);
+      maxPrice = Math.max(maxPrice, price);
+    }
+    
+    return {
+      crossingCount,
+      startPrice: windowPrices[0].price,
+      endPrice: windowPrices[windowPrices.length - 1].price,
+      minPrice,
+      maxPrice,
+    };
   }
 }
 

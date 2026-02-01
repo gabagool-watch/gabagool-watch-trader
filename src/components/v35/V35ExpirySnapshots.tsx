@@ -32,6 +32,9 @@ interface ExpirySnapshot {
   predicted_pnl: number;
   was_imbalanced: boolean;
   imbalance_ratio: number | null;
+  crossing_count: number | null;
+  spot_price: number | null;
+  strike_price: number | null;
   created_at: string;
 }
 
@@ -129,6 +132,7 @@ export function V35ExpirySnapshots() {
   const avgCPP = snapshots && snapshots.length > 0
     ? snapshots.reduce((sum, s) => sum + (s.combined_cost || 0), 0) / snapshots.length
     : 0;
+  const highCrossingCount = snapshots?.filter(s => s.crossing_count !== null && s.crossing_count >= 3).length || 0;
 
   return (
     <>
@@ -144,6 +148,9 @@ export function V35ExpirySnapshots() {
             <span>📈 Avg CPP: ${avgCPP.toFixed(4)}</span>
             <span className={imbalancedCount > 0 ? "text-warning" : ""}>
               ⚠️ {imbalancedCount} imbalanced
+            </span>
+            <span className={highCrossingCount > 0 ? "text-orange-500" : ""}>
+              🔄 {highCrossingCount} high crossing (≥3)
             </span>
           </div>
         </CardHeader>
@@ -167,6 +174,7 @@ export function V35ExpirySnapshots() {
                     <TableHead className="text-right">Total Cost</TableHead>
                     <TableHead>Winner</TableHead>
                     <TableHead className="text-right">P&L</TableHead>
+                    <TableHead className="text-center">Crossings</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead></TableHead>
                   </TableRow>
@@ -240,6 +248,22 @@ export function V35ExpirySnapshots() {
                         </TableCell>
                         <TableCell className={`text-right font-mono font-bold ${isProfitable ? "text-primary" : "text-destructive"}`}>
                           {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                        </TableCell>
+                        <TableCell className="text-center">
+                          {snapshot.crossing_count !== null ? (
+                            <Badge 
+                              variant="outline" 
+                              className={snapshot.crossing_count >= 3 
+                                ? 'bg-orange-500/10 text-orange-600 border-orange-500/30' 
+                                : snapshot.crossing_count >= 1 
+                                  ? 'bg-yellow-500/10 text-yellow-600 border-yellow-500/30'
+                                  : 'bg-muted/50 text-muted-foreground'}
+                            >
+                              🔄 {snapshot.crossing_count}
+                            </Badge>
+                          ) : (
+                            <span className="text-muted-foreground text-xs">—</span>
+                          )}
                         </TableCell>
                         <TableCell>
                           {snapshot.was_imbalanced ? (
@@ -331,7 +355,7 @@ export function V35ExpirySnapshots() {
             return (
               <div className="mt-4 space-y-3">
                 
-                <div className="grid grid-cols-5 gap-3 text-sm">
+                <div className="grid grid-cols-6 gap-3 text-sm">
                   <div className="bg-muted/50 rounded-lg p-3">
                     <div className="text-muted-foreground text-xs">UP Shares (API)</div>
                     <div className="font-bold text-emerald-600">{selectedMarket.api_up_qty.toFixed(1)}</div>
@@ -351,6 +375,17 @@ export function V35ExpirySnapshots() {
                     <div className={`font-bold ${selectedMarket.unpaired > 50 ? "text-destructive" : "text-warning"}`}>
                       {selectedMarket.unpaired.toFixed(1)}
                     </div>
+                  </div>
+                  <div className={`rounded-lg p-3 ${selectedMarket.crossing_count !== null && selectedMarket.crossing_count >= 3 ? "bg-orange-500/10" : "bg-muted/50"}`}>
+                    <div className="text-muted-foreground text-xs">Crossings</div>
+                    <div className={`font-bold ${selectedMarket.crossing_count !== null && selectedMarket.crossing_count >= 3 ? "text-orange-600" : ""}`}>
+                      🔄 {selectedMarket.crossing_count ?? '—'}
+                    </div>
+                    {selectedMarket.strike_price && (
+                      <div className="text-muted-foreground text-[10px]">
+                        Strike: ${selectedMarket.strike_price.toLocaleString()}
+                      </div>
+                    )}
                   </div>
                   <div className={`rounded-lg p-3 ${pnl >= 0 ? "bg-emerald-500/10" : "bg-rose-500/10"}`}>
                     <div className="text-muted-foreground text-xs">P&L {winner ? `(${winner} won)` : ''}</div>
