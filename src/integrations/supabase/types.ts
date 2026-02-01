@@ -6932,6 +6932,51 @@ export type Database = {
         }
         Relationships: []
       }
+      v35_price_ticks: {
+        Row: {
+          asset: string
+          created_at: string
+          down_best_ask: number | null
+          down_best_bid: number | null
+          id: string
+          market_slug: string
+          run_id: string | null
+          spot_price: number
+          strike_price: number | null
+          ts: number
+          up_best_ask: number | null
+          up_best_bid: number | null
+        }
+        Insert: {
+          asset: string
+          created_at?: string
+          down_best_ask?: number | null
+          down_best_bid?: number | null
+          id?: string
+          market_slug: string
+          run_id?: string | null
+          spot_price: number
+          strike_price?: number | null
+          ts: number
+          up_best_ask?: number | null
+          up_best_bid?: number | null
+        }
+        Update: {
+          asset?: string
+          created_at?: string
+          down_best_ask?: number | null
+          down_best_bid?: number | null
+          id?: string
+          market_slug?: string
+          run_id?: string | null
+          spot_price?: number
+          strike_price?: number | null
+          ts?: number
+          up_best_ask?: number | null
+          up_best_bid?: number | null
+        }
+        Relationships: []
+      }
       v35_settlements: {
         Row: {
           asset: string
