@@ -31,12 +31,13 @@ export function V35PairFillTimeTable() {
     setIsLoading(true);
     
     try {
+      // Fetch ALL pair events across all markets
       const { data, error } = await supabase
         .from('bot_events')
         .select('*')
         .in('event_type', ['pair_taker_filled', 'pair_hedged', 'pair_maker_placed', 'pair_blocked'])
         .order('ts', { ascending: false })
-        .limit(500);
+        .limit(5000);
 
       if (error) {
         console.error('[V35PairFillTimeTable] Failed to fetch:', error);
