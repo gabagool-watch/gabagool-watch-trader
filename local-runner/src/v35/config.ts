@@ -21,8 +21,8 @@
 // This ensures imbalances are FIXED, not abandoned via bans.
 // ============================================================
 
-export const V35_VERSION = 'V36.6.0';
-export const V35_CODENAME = 'Risk Guards - Share Gap + CPP Protection';
+export const V35_VERSION = 'V36.7.0';
+export const V35_CODENAME = 'Dynamic Delta Margin';
 
 export type V35Mode = 'test' | 'moderate' | 'production';
 

@@ -1,7 +1,8 @@
 // ============================================================
 // V36 PAIR TRACKER - INDEPENDENT PAIR LIFECYCLE MANAGEMENT
 // ============================================================
-// Version: V36.6.0 - "Risk Guards - Share Gap + CPP Protection"
+// Version: V36.7.0 - "Dynamic Delta Margin"
+// Version: V36.6.0 - "Risk Guards - Share Gap Guard"
 // Version: V36.5.3 - "Maker Inventory Pre-Hedging"
 //
 // V36.5.3 CAPITAL EFFICIENCY:
@@ -512,32 +513,66 @@ export class PairTracker {
     }
     
     // =========================================================================
-    // V36.3.8 CRITICAL: PRE-CHECK MAKER VIABILITY!
+    // V36.7.0: DYNAMIC DELTA MARGIN
     // =========================================================================
-    const projectedMakerPrice = this.config.targetCpp - expensiveAsk;
+    // Profit margin scales with delta confidence:
+    // - Large delta (|delta| > 500): High confidence → 10¢ margin
+    // - Medium delta (|delta| > 200): Medium confidence → 7¢ margin  
+    // - Small-medium (|delta| > 50): Low-medium confidence → 5¢ margin
+    // - Small delta (|delta| <= 50): Low confidence → 3¢ margin
+    //
+    // This allows more profit when we're confident, less when uncertain.
+    // Always falls back to minimum viable margin if ideal isn't possible.
+    // =========================================================================
+    const binanceFeed = getBinanceFeed();
+    const currentBtcPrice = binanceFeed?.getPrice('BTC') || 0;
+    const strikePrice = market.strikePrice || 0;
+    const delta = currentBtcPrice - strikePrice;
+    const absDelta = Math.abs(delta);
     
-    // =========================================================================
-    // V36.6.0 RISK GUARD 2: PROJECTED CPP CHECK
-    // =========================================================================
-    // Data shows 55% of losses have CPP >= 0.95 (no profit margin).
-    // Block if projected combined cost >= 0.95 (target CPP is already 0.95).
-    // =========================================================================
-    const MAX_PROJECTED_CPP = 0.95;
-    const projectedCpp = expensiveAsk + Math.max(projectedMakerPrice, cheapAsk);
+    // Calculate target margin based on delta confidence
+    let targetMargin: number;
+    let confidenceLevel: string;
     
-    if (projectedCpp >= MAX_PROJECTED_CPP) {
-      const reason = `CPP_GUARD: projected=${projectedCpp.toFixed(3)} >= ${MAX_PROJECTED_CPP.toFixed(2)} (taker=$${expensiveAsk.toFixed(3)} + maker=$${Math.max(projectedMakerPrice, cheapAsk).toFixed(3)})`;
-      console.log(`[PairTracker] 🔴 BLOCKED: ${reason}`);
-      logV35GuardEvent({
-        marketSlug: market.slug,
-        asset: market.asset,
-        guardType: 'CPP_GUARD',
-        blockedSide: expensiveSide,
-        upQty: market.upQty,
-        downQty: market.downQty,
-        expensiveSide,
-        reason,
-      }).catch(() => {});
+    if (absDelta > 500) {
+      targetMargin = 0.10;  // 10¢ - very confident, take more profit
+      confidenceLevel = 'HIGH';
+    } else if (absDelta > 200) {
+      targetMargin = 0.07;  // 7¢ - medium confidence
+      confidenceLevel = 'MEDIUM';
+    } else if (absDelta > 50) {
+      targetMargin = 0.05;  // 5¢ - low-medium confidence
+      confidenceLevel = 'LOW_MEDIUM';
+    } else {
+      targetMargin = 0.03;  // 3¢ - low confidence, play safe
+      confidenceLevel = 'LOW';
+    }
+    
+    // Calculate ideal maker price: 1.00 - expensiveAsk - targetMargin
+    // (Orderbook sums to ~$1, so cheapSide ≈ 1 - expensiveSide)
+    const idealMakerPrice = 1.00 - expensiveAsk - targetMargin;
+    
+    // But we need at least $0.05 for Polymarket minimum
+    const POLYMARKET_MIN_PRICE = 0.05;
+    
+    // If ideal price is too low, calculate maximum achievable margin
+    let actualMakerPrice: number;
+    let actualMargin: number;
+    
+    if (idealMakerPrice >= POLYMARKET_MIN_PRICE) {
+      // We can achieve our target margin
+      actualMakerPrice = idealMakerPrice;
+      actualMargin = targetMargin;
+    } else {
+      // Fall back to minimum price, accept reduced margin
+      actualMakerPrice = POLYMARKET_MIN_PRICE;
+      actualMargin = 1.00 - expensiveAsk - POLYMARKET_MIN_PRICE;
+      console.log(`[PairTracker] ⚠️ Ideal price $${idealMakerPrice.toFixed(2)} < $${POLYMARKET_MIN_PRICE} min, falling back to $${actualMakerPrice.toFixed(2)} (${(actualMargin * 100).toFixed(1)}¢ margin)`);
+    }
+    
+    // Final check: is there ANY profit margin?
+    if (actualMargin < 0.01) {
+      console.log(`[PairTracker] 🔴 BLOCKED: No viable margin (${(actualMargin * 100).toFixed(1)}¢ < 1¢)`);
       logPairEvent({
         pairId: `blocked_${Date.now()}`,
         eventType: 'pair_blocked',
@@ -547,12 +582,18 @@ export class PairTracker {
         takerPrice: expensiveAsk,
         takerSize: size,
         makerSide: cheapSide,
-        makerPrice: projectedMakerPrice,
+        makerPrice: actualMakerPrice,
         makerSize: size,
-        status: 'cpp_guard',
+        status: 'no_viable_margin',
       });
-      return { success: false, error: 'cpp_guard' };
+      return { success: false, error: 'no_viable_margin' };
     }
+    
+    console.log(`[PairTracker] 📊 DYNAMIC MARGIN: delta=${delta.toFixed(0)} (${confidenceLevel}) → target=${(targetMargin * 100).toFixed(0)}¢, actual=${(actualMargin * 100).toFixed(1)}¢`);
+    console.log(`[PairTracker]    Taker: ${expensiveSide} @ $${expensiveAsk.toFixed(3)} | Maker: ${cheapSide} @ $${actualMakerPrice.toFixed(3)}`);
+    
+    // Use actualMakerPrice instead of the old projectedMakerPrice
+    const projectedMakerPrice = actualMakerPrice;
     
     // Maker must be at least $0.05 (Polymarket minimum)
     if (projectedMakerPrice < 0.05) {
