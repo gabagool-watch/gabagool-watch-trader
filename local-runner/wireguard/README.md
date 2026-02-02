@@ -53,6 +53,7 @@ Only Polymarket traffic goes through VPN. Everything else (Binance, Supabase, ot
 The split tunnel routes **only these domains** through VPN:
 - `clob.polymarket.com`
 - `gamma-api.polymarket.com`
+- `relayer.polymarket.com`
 - `polymarket.com`
 - `strapi-matic.poly.market`
 - `data-api.polymarket.com`
