@@ -122,20 +122,29 @@ claim_usdc NUMERIC
 
 ## Proxy Wallet Mode
 
-### V35.10.2 Update: Proxy Wallet Claiming Now Supported
+### V35.11.0 Update: Proxy Wallet Claiming via execute()
 
-Previous versions blocked automated claiming for proxy wallets. This has been fixed:
+Previous versions incorrectly called `redeemPositions` directly from the signer wallet, but the conditional tokens are held by the **proxy wallet**. This has been fixed:
 
 **How it works:**
-- The redeemer now attempts to claim regardless of wallet type
-- For Magic/Email accounts, the exported private key controls the proxy wallet
-- The CTF contract checks token balances, not ownership metadata
-- Your signer can call `redeemPositions` as long as POLYMARKET_ADDRESS matches the wallet holding the tokens
+- The redeemer now detects when positions are held by the proxy wallet (not the signer)
+- For proxy positions, it calls `proxy.execute(CTF_ADDRESS, redeemPositions(...))` 
+- This makes the proxy wallet the `msg.sender` to the CTF contract, so it can redeem its own tokens
+- The signer wallet pays gas but the tokens move from proxy → USDC in proxy
 
-**If claims fail:**
+**Wallet architecture (Magic/Email accounts):**
+```
+Signer (EOA) ─────► Proxy Wallet ─────► CTF Contract
+   │                    │                    │
+   │ pays gas           │ holds tokens       │ redeems
+   └────────────────────┴────────────────────┘
+```
+
+**If claims still fail:**
 1. Verify `POLYMARKET_ADDRESS` matches your proxy wallet address (visible in Polymarket UI)
-2. Ensure the signer wallet has MATIC for gas (~0.01 MATIC per claim)
-3. Run `npm run claim:debug` to diagnose issues
+2. Ensure the signer wallet has MATIC for gas (~0.02 MATIC per claim)
+3. Check that the signer is authorized on the proxy wallet (should be automatic for Magic exports)
+4. Run `npm run claim:debug` to diagnose issues
 
 **Manual claiming (fallback):**
 1. Go to https://polymarket.com/portfolio

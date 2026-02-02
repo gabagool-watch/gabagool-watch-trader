@@ -424,7 +424,6 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
 async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResult> {
   const conditionId = position.conditionId;
   const provider = getProvider();
-  const ctfContract = new ethers.Contract(CTF_ADDRESS, CTF_REDEEM_ABI, wallet!);
 
   // Determine which wallet holds the position
   const positionWallet = (position.proxyWallet || '').toLowerCase();
@@ -437,11 +436,6 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
   console.log(`   📍 Config proxy: ${configProxy.slice(0, 10) || 'not set'}...`);
 
   // Check if the signer can claim this position
-  // For Polymarket, the signer wallet derived from the private key CAN call redeemPositions
-  // even if the positions are technically "owned" by a proxy address, because:
-  // 1. For Magic/Email accounts: the exported private key controls the proxy
-  // 2. The CTF contract checks the actual token balances, not ownership
-  
   // Important: The position wallet must match either signer or config proxy
   if (positionWallet !== signerWallet && positionWallet !== configProxy) {
     console.log(`   ⚠️ Position wallet doesn't match signer or config proxy`);
@@ -452,11 +446,20 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
     };
   }
 
+  // V35.11.0 FIX: Determine which wallet to claim FROM
+  // For proxy wallets, the shares are held in the PROXY wallet, not the signer.
+  // The CTF contract needs msg.sender to be the token holder.
+  // For Magic/Email accounts, Polymarket uses a ProxyWallet contract where:
+  //   - The "funder" (proxy address) holds the conditional tokens
+  //   - The signer can execute transactions on behalf of the funder via execute()
+  const claimFromWallet = positionWallet === signerWallet ? signerWallet : configProxy;
+  const isClaimingViaProxy = claimFromWallet !== signerWallet && claimFromWallet.length > 0;
+
+  console.log(`   🎯 Claiming from: ${claimFromWallet.slice(0, 10)}... (${isClaimingViaProxy ? 'via proxy' : 'direct EOA'})`);
+
   try {
     // ----------------------------------------------------------------------
     // Preflight: ensure signer has enough MATIC for gas.
-    // The error in your screenshot happens during estimateGas when the signer
-    // balance is too low.
     // ----------------------------------------------------------------------
     const signer = wallet!.address;
     const balanceWei = await provider.getBalance(signer);
@@ -484,7 +487,7 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
     const gasPriceGwei = parseFloat(ethers.utils.formatUnits(maxPriority, 'gwei'));
 
     // Conservative default gas limit; avoid calling estimateGas when balance is low.
-    const conservativeGasLimit = ethers.BigNumber.from(300_000);
+    const conservativeGasLimit = ethers.BigNumber.from(350_000); // Slightly higher for proxy calls
     const worstCaseCostWei = conservativeGasLimit.mul(maxFee);
 
     if (balanceWei.lt(worstCaseCostWei)) {
@@ -500,16 +503,52 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
 
     console.log(`   ⛽ Gas: priority=${gasPriceGwei.toFixed(1)} gwei`);
 
-    const tx = await ctfContract.redeemPositions(
-      USDC_ADDRESS,
-      parentCollectionId,
-      conditionId,
-      indexSets,
-      {
-        maxFeePerGas: maxFee,
-        maxPriorityFeePerGas: maxPriority,
-      }
-    );
+    let tx: any;
+
+    if (isClaimingViaProxy) {
+      // V35.11.0: For proxy wallet positions, call the proxy wallet's execute method
+      // to have it call redeemPositions on the CTF contract
+      // Polymarket proxy wallets have an execute(address target, bytes data) method
+      const PROXY_WALLET_ABI = [
+        'function execute(address target, bytes calldata data) external returns (bytes memory)',
+      ];
+      
+      const proxyContract = new ethers.Contract(claimFromWallet, PROXY_WALLET_ABI, wallet!);
+      
+      // Encode the redeemPositions call
+      const ctfInterface = new ethers.utils.Interface(CTF_REDEEM_ABI);
+      const redeemCalldata = ctfInterface.encodeFunctionData('redeemPositions', [
+        USDC_ADDRESS,
+        parentCollectionId,
+        conditionId,
+        indexSets,
+      ]);
+      
+      console.log(`   📤 Calling proxy.execute(CTF, redeemPositions(...))`);
+      
+      tx = await proxyContract.execute(
+        CTF_ADDRESS,
+        redeemCalldata,
+        {
+          maxFeePerGas: maxFee,
+          maxPriorityFeePerGas: maxPriority,
+        }
+      );
+    } else {
+      // Direct EOA mode - signer is the token holder
+      const ctfContract = new ethers.Contract(CTF_ADDRESS, CTF_REDEEM_ABI, wallet!);
+      
+      tx = await ctfContract.redeemPositions(
+        USDC_ADDRESS,
+        parentCollectionId,
+        conditionId,
+        indexSets,
+        {
+          maxFeePerGas: maxFee,
+          maxPriorityFeePerGas: maxPriority,
+        }
+      );
+    }
 
     console.log(`   ⏳ Tx sent: ${tx.hash}`);
 
