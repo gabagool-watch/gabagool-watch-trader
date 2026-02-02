@@ -60,6 +60,22 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
     refetchInterval: isLive ? 5000 : false,
   });
 
+  // Fetch strike price from strike_prices table
+  const { data: strikePriceData } = useQuery({
+    queryKey: ['strike-price', marketSlug],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('strike_prices')
+        .select('strike_price')
+        .eq('market_slug', marketSlug)
+        .maybeSingle();
+      
+      if (error) throw error;
+      return data?.strike_price as number | null;
+    },
+    staleTime: 60000,
+  });
+
   // Subscribe to realtime updates for live markets
   useEffect(() => {
     if (!isLive) return;
@@ -126,11 +142,14 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
     });
   }, [allTicks, startTs]);
 
-  // Get strike price (from first tick with it, or from strike_prices table)
+  // Get strike price - prefer from strike_prices table, fallback to ticks
   const strikePrice = useMemo(() => {
+    // First try from dedicated strike_prices table
+    if (strikePriceData != null) return strikePriceData;
+    // Fallback to tick data
     const tickWithStrike = allTicks.find((t) => t.strike_price != null);
     return tickWithStrike?.strike_price ?? null;
-  }, [allTicks]);
+  }, [strikePriceData, allTicks]);
 
   // Determine winner based on last tick
   const lastTick = allTicks[allTicks.length - 1];
