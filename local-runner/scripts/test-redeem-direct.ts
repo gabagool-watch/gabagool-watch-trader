@@ -17,8 +17,7 @@ import { config } from '../src/config.js';
 import pkg from 'ethers';
 const { ethers, Wallet } = pkg as any;
 
-const CTF_ADDRESS = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
-const POLYGON_RPC = 'https://polygon-rpc.com';
+import { CTF_ADDRESS, getProvider, getProxyOwner } from '../src/chain.js';
 
 const CTF_REDEEM_ABI = [
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] calldata indexSets) external',
@@ -51,7 +50,7 @@ async function main() {
     process.exit(1);
   }
 
-  const provider = new ethers.providers.JsonRpcProvider(POLYGON_RPC);
+  const provider = getProvider();
   const wallet = new Wallet(privateKey, provider);
   
   console.log(`\n📍 Signer: ${wallet.address}`);
@@ -70,27 +69,50 @@ async function main() {
   // Connect to proxy wallet
   const proxyContract = new ethers.Contract(proxyWallet, POLYMARKET_PROXY_WALLET_ABI, wallet);
 
-  // Verify ownership
+  // Verify ownership (robust detection)
   console.log(`\n🔍 Verifying proxy wallet ownership...`);
-  try {
-    const owner = await proxyContract.owner();
-    console.log(`   Owner: ${owner}`);
-    
-    if (owner.toLowerCase() !== wallet.address.toLowerCase()) {
-      console.error(`\n❌ Signer is NOT the proxy wallet owner!`);
-      console.error(`   Signer: ${wallet.address}`);
-      console.error(`   Owner:  ${owner}`);
-      process.exit(1);
-    }
-    console.log(`   ✅ Signer is the owner`);
-  } catch (e: any) {
-    console.log(`   ⚠️ Could not verify ownership: ${e.message}`);
-    console.log(`   Proceeding anyway (might fail)...`);
+  const ownerInfo = await getProxyOwner(proxyWallet);
+  console.log(`   Proxy type: ${ownerInfo.proxyType}`);
+  console.log(`   Owner: ${ownerInfo.ownerAddress ?? 'unknown'}`);
+
+  if (ownerInfo.proxyType === 'gnosis') {
+    console.error(`\n❌ This proxy is a Gnosis Safe; it cannot be redeemed via proxy.execute().`);
+    console.error(`   Use the Safe execTransaction() path in the runner (signatureType=2).`);
+    process.exit(1);
   }
+
+  if (!ownerInfo.ownerAddress) {
+    console.error(`\n❌ Could not determine proxy owner; refusing to proceed (execute would likely revert).`);
+    process.exit(1);
+  }
+
+  if (!ownerInfo.isOwnedBy(wallet.address)) {
+    console.error(`\n❌ Signer is NOT the proxy wallet owner!`);
+    console.error(`   Signer: ${wallet.address}`);
+    console.error(`   Owner:  ${ownerInfo.ownerAddress}`);
+    console.error(`\n💡 Fix: set POLYMARKET_PRIVATE_KEY to the private key that owns POLYMARKET_ADDRESS.`);
+    process.exit(1);
+  }
+  console.log(`   ✅ Signer is the owner`);
 
   // Build redemption calldata
   console.log(`\n📦 Building redemption transaction...`);
-  const indexSets = [1, 2];
+  // Derive correct indexSets from outcome slot count (fallback to binary)
+  let indexSets = [1, 2];
+  try {
+    const ctfRead = new ethers.Contract(
+      CTF_ADDRESS,
+      ['function getOutcomeSlotCount(bytes32 conditionId) view returns (uint256)'],
+      provider
+    );
+    const n = await ctfRead.getOutcomeSlotCount(conditionId);
+    const count = Number(n?.toString?.() ?? n);
+    if (Number.isFinite(count) && count > 0 && count <= 16) {
+      indexSets = Array.from({ length: count }, (_, i) => 1 << i);
+    }
+  } catch {
+    // ignore (fallback stays)
+  }
   const parentCollectionId = ethers.utils.hexZeroPad('0x00', 32);
   const ctfInterface = new ethers.utils.Interface(CTF_REDEEM_ABI);
   const redeemCalldata = ctfInterface.encodeFunctionData('redeemPositions', [
