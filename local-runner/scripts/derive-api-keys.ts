@@ -24,7 +24,7 @@ const CLOB_API_URL = 'https://clob.polymarket.com';
 const CHAIN_ID = 137; // Polygon mainnet
 
 const FORCE_CREATE = process.argv.includes('--create');
-const ALLOW_MISMATCH = process.argv.includes('--allow-mismatch');
+const ALLOW_MISMATCH = process.argv.includes('--allow-mismatch'); // legacy flag; mismatch is usually expected in proxy/safe setups
 
 async function main() {
   console.log('\n🔑 DERIVE CLOB API CREDENTIALS');
@@ -64,17 +64,14 @@ async function main() {
     console.log(`   Wallet address from key: ${walletAddress}`);
     
     if (walletAddress.toLowerCase() !== address.toLowerCase()) {
-      console.error(`\n   ⚠️ WARNING: Wallet address mismatch!`);
-      console.error(`   Config address:  ${address}`);
-      console.error(`   Derived address: ${walletAddress}`);
-      console.error(`   The private key does not match POLYMARKET_ADDRESS!`);
-
+      console.log(`\n   ℹ️ Signer/funder split detected (this is normal for proxy/safe setups):`);
+      console.log(`   - signer (from private key): ${walletAddress}`);
+      console.log(`   - funder (POLYMARKET_ADDRESS): ${address}`);
+      console.log(
+        `   Using signatureType=${signatureType}. If you expected these to be the same, your private key may not match the intended account.`
+      );
       if (!ALLOW_MISMATCH) {
-        console.error(
-          '\n   Aborting by default (safety). If this mismatch is intentional, re-run with:'
-        );
-        console.error('   npx tsx scripts/derive-api-keys.ts --allow-mismatch');
-        process.exit(1);
+        console.log('   (You can ignore this message. --allow-mismatch is no longer required.)');
       }
     }
 
@@ -84,7 +81,8 @@ async function main() {
       CHAIN_ID,
       wallet, // Pass Wallet object, not raw key
       undefined, // No API creds yet
-      signatureType
+      signatureType,
+      address // funder (proxy/safe) address when applicable
     );
 
     console.log('   ✅ Client initialized');
@@ -122,10 +120,14 @@ async function main() {
     console.log('🎉 SUCCESS! Here are your L2 API credentials:');
     console.log('='.repeat(60));
     console.log('\nAdd these to your .env file:\n');
-    // clob-client returns ApiKeyCreds with fields: { key, secret, passphrase }
-    console.log(`POLYMARKET_API_KEY=${apiCreds.key}`);
-    console.log(`POLYMARKET_API_SECRET=${apiCreds.secret}`);
-    console.log(`POLYMARKET_PASSPHRASE=${apiCreds.passphrase}`);
+    // clob-client has had multiple shapes in the wild; normalize defensively
+    const apiKey = apiCreds.key ?? apiCreds.apiKey;
+    const apiSecret = apiCreds.secret ?? apiCreds.apiSecret;
+    const apiPassphrase = apiCreds.passphrase ?? apiCreds.apiPassphrase;
+
+    console.log(`POLYMARKET_API_KEY=${apiKey}`);
+    console.log(`POLYMARKET_API_SECRET=${apiSecret}`);
+    console.log(`POLYMARKET_PASSPHRASE=${apiPassphrase}`);
     console.log('\n' + '='.repeat(60));
 
     // Test the credentials
@@ -136,11 +138,18 @@ async function main() {
       CHAIN_ID,
       wallet, // Use same Wallet object
       {
-        key: apiCreds.key,
-        secret: apiCreds.secret,
-        passphrase: apiCreds.passphrase,
+        // New/official field names
+        apiKey,
+        apiSecret,
+        apiPassphrase,
+        address: walletAddress,
+        // Back-compat field names
+        key: apiKey,
+        secret: apiSecret,
+        passphrase: apiPassphrase,
       },
-      signatureType
+      signatureType,
+      address
     );
 
     // Try to get API keys to verify
