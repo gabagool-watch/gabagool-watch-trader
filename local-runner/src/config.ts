@@ -276,6 +276,10 @@ export const config = {
       const n = Number(raw);
       return n === 0 || n === 1 || n === 2 ? (n as 0 | 1 | 2) : undefined;
     })(),
+    // Builder API credentials for Relayer (gasless redemptions)
+    builderApiKey: process.env.POLY_BUILDER_API_KEY || '',
+    builderApiSecret: process.env.POLY_BUILDER_API_SECRET || '',
+    builderPassphrase: process.env.POLY_BUILDER_PASSPHRASE || '',
   },
   vpn: {
     // Default ON: only disable explicitly with VPN_REQUIRED=false

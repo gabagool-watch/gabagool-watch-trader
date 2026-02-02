@@ -190,5 +190,19 @@ POLYMARKET_USDC_ADDRESS=0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
 POLYMARKET_USDC_ADDRESS=0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359
 ```
 
+### Magic/Email wallet claims failing
+For Magic Link (email) accounts, the proxy wallet is managed by Polymarket's backend, 
+not your signer. You **must** use the Relayer API for gasless redemptions.
+
+**Solution:** Configure Builder API credentials:
+```bash
+POLY_BUILDER_API_KEY=your_builder_key
+POLY_BUILDER_API_SECRET=your_builder_secret
+POLY_BUILDER_PASSPHRASE=your_builder_passphrase
+POLYMARKET_SIGNATURE_TYPE=1
+```
+
+Get Builder credentials from the [Polymarket Builder Program](https://docs.polymarket.com/#builder-api).
+
 ### Claims stuck as "pending"
 Run `npm run claim:debug` to see on-chain status vs API status. Indexer delays of 5-10 minutes are normal.
