@@ -19,9 +19,11 @@ import crypto from 'node:crypto';
 
 const CTF_ADDRESS = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
 
-// Polymarket Relayer v2 endpoints (correct URLs)
+// Polymarket API endpoints to test
 const RELAYER_V2_BASE = 'https://relayer-v2.polymarket.com';
 const RELAYER_CLOB_BASE = 'https://clob.polymarket.com';
+const GAMMA_API_BASE = 'https://gamma-api.polymarket.com';
+const MAIN_API_BASE = 'https://api.polymarket.com';
 
 const CTF_REDEEM_ABI = [
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] calldata indexSets) external',
@@ -72,11 +74,22 @@ const ENDPOINTS_TO_TRY = [
   // Relayer v2 (new official)
   { label: 'Relayer v2 /execute', baseUrl: RELAYER_V2_BASE, path: '/execute' },
   { label: 'Relayer v2 /relay', baseUrl: RELAYER_V2_BASE, path: '/relay' },
-  { label: 'Relayer v2 /relay/execute', baseUrl: RELAYER_V2_BASE, path: '/relay/execute' },
   { label: 'Relayer v2 /v1/execute', baseUrl: RELAYER_V2_BASE, path: '/v1/execute' },
+  { label: 'Relayer v2 /claim', baseUrl: RELAYER_V2_BASE, path: '/claim' },
+  { label: 'Relayer v2 /redeem', baseUrl: RELAYER_V2_BASE, path: '/redeem' },
   // CLOB-integrated relayer (fallback)
   { label: 'CLOB /relayer/execute', baseUrl: RELAYER_CLOB_BASE, path: '/relayer/execute' },
   { label: 'CLOB /relay/execute', baseUrl: RELAYER_CLOB_BASE, path: '/relay/execute' },
+  { label: 'CLOB /claim', baseUrl: RELAYER_CLOB_BASE, path: '/claim' },
+  { label: 'CLOB /redeem', baseUrl: RELAYER_CLOB_BASE, path: '/redeem' },
+  // Gamma API (market data + possible claims)
+  { label: 'Gamma /claim', baseUrl: GAMMA_API_BASE, path: '/claim' },
+  { label: 'Gamma /redeem', baseUrl: GAMMA_API_BASE, path: '/redeem' },
+  { label: 'Gamma /positions/claim', baseUrl: GAMMA_API_BASE, path: '/positions/claim' },
+  // Main API
+  { label: 'API /claim', baseUrl: MAIN_API_BASE, path: '/claim' },
+  { label: 'API /redeem', baseUrl: MAIN_API_BASE, path: '/redeem' },
+  { label: 'API /relayer/execute', baseUrl: MAIN_API_BASE, path: '/relayer/execute' },
 ];
 
 async function tryEndpoint(
