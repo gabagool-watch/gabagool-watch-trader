@@ -43,41 +43,52 @@ function buildRelayerSignature(
 }
 
 async function main() {
-  console.log('\n🧪 RELAYER API TEST');
+  console.log('\n🧪 CLOB API AUTH TEST');
   console.log('='.repeat(60));
 
-  // Step 1: Check credentials
-  console.log('\n📋 STEP 1: Checking Builder API credentials...');
+  // Step 1: Check credentials - BOTH sets
+  console.log('\n📋 STEP 1: Checking API credentials...');
   
-  const apiKey = config.polymarket.builderApiKey;
-  const apiSecret = config.polymarket.builderApiSecret;
-  const passphrase = config.polymarket.builderPassphrase;
+  // Regular CLOB credentials
+  const regularApiKey = config.polymarket.apiKey;
+  const regularApiSecret = config.polymarket.apiSecret;
+  const regularPassphrase = config.polymarket.passphrase;
+  const address = config.polymarket.address;
+  
+  // Builder credentials (for comparison)
+  const builderApiKey = config.polymarket.builderApiKey;
+  const builderApiSecret = config.polymarket.builderApiSecret;
+  const builderPassphrase = config.polymarket.builderPassphrase;
 
-  console.log(`   POLY_BUILDER_API_KEY: ${apiKey ? `✅ set (${apiKey.length} chars, starts with "${apiKey.slice(0, 8)}...")` : '❌ MISSING'}`);
-  console.log(`   POLY_BUILDER_API_SECRET: ${apiSecret ? `✅ set (${apiSecret.length} chars)` : '❌ MISSING'}`);
-  console.log(`   POLY_BUILDER_PASSPHRASE: ${passphrase ? `✅ set (${passphrase.length} chars)` : '❌ MISSING'}`);
+  console.log('\n   Regular CLOB credentials:');
+  console.log(`   POLYMARKET_API_KEY: ${regularApiKey ? `✅ set (${regularApiKey.length} chars, starts with "${regularApiKey.slice(0, 8)}...")` : '❌ MISSING'}`);
+  console.log(`   POLYMARKET_API_SECRET: ${regularApiSecret ? `✅ set (${regularApiSecret.length} chars)` : '❌ MISSING'}`);
+  console.log(`   POLYMARKET_PASSPHRASE: ${regularPassphrase ? `✅ set (${regularPassphrase.length} chars)` : '❌ MISSING'}`);
+  console.log(`   POLYMARKET_ADDRESS: ${address ? `✅ set (${address.slice(0, 10)}...)` : '❌ MISSING'}`);
 
-  if (!apiKey || !apiSecret || !passphrase) {
-    console.error('\n❌ Missing Builder API credentials!');
-    console.error('   Make sure these are in your .env file:');
-    console.error('   - POLY_BUILDER_API_KEY');
-    console.error('   - POLY_BUILDER_API_SECRET');
-    console.error('   - POLY_BUILDER_PASSPHRASE');
+  console.log('\n   Builder credentials (for reference):');
+  console.log(`   POLY_BUILDER_API_KEY: ${builderApiKey ? `✅ set (${builderApiKey.length} chars)` : '⚠️ not set'}`);
+  console.log(`   POLY_BUILDER_API_SECRET: ${builderApiSecret ? `✅ set (${builderApiSecret.length} chars)` : '⚠️ not set'}`);
+  console.log(`   POLY_BUILDER_PASSPHRASE: ${builderPassphrase ? `✅ set (${builderPassphrase.length} chars)` : '⚠️ not set'}`);
+
+  if (!regularApiKey || !regularApiSecret || !regularPassphrase || !address) {
+    console.error('\n❌ Missing regular CLOB API credentials!');
     process.exit(1);
   }
 
-  console.log('\n   ✅ All credentials present!');
+  console.log('\n   ✅ Regular credentials present!');
 
-  // Step 2: Test signature generation
+  // Step 2: Test signature generation with REGULAR credentials
   console.log('\n📋 STEP 2: Testing HMAC signature generation...');
   
+  let secretBytes: Buffer;
   try {
-    const sanitizedSecret = sanitizeBase64Secret(apiSecret);
-    const secretBytes = Buffer.from(sanitizedSecret, 'base64');
+    const sanitizedSecret = sanitizeBase64Secret(regularApiSecret);
+    secretBytes = Buffer.from(sanitizedSecret, 'base64');
     console.log(`   Sanitized secret length: ${sanitizedSecret.length} chars`);
     console.log(`   Secret bytes length: ${secretBytes.length} bytes`);
 
-    const testTimestamp = Math.floor(Date.now() / 1000).toString();
+    const testTimestamp = Date.now().toString();
     const testSignature = buildRelayerSignature(secretBytes, testTimestamp, 'GET', '/health');
     console.log(`   Test signature: ${testSignature.slice(0, 20)}...`);
     console.log('   ✅ Signature generation works!');
@@ -110,12 +121,10 @@ async function main() {
     console.error('   This might be a network/DNS issue on the VPS.');
   }
 
-  // Step 4: Test authenticated endpoint
-  console.log('\n📋 STEP 4: Testing authenticated CLOB API call...');
+  // Step 4: Test authenticated endpoint with REGULAR credentials
+  console.log('\n📋 STEP 4: Testing authenticated CLOB API call (regular credentials)...');
   
   try {
-    const sanitizedSecret = sanitizeBase64Secret(apiSecret);
-    const secretBytes = Buffer.from(sanitizedSecret, 'base64');
     // IMPORTANT: Polymarket uses MILLISECONDS, not seconds!
     const timestamp = Date.now().toString();
     const method = 'GET';
@@ -123,21 +132,18 @@ async function main() {
     
     const signature = buildRelayerSignature(secretBytes, timestamp, method, path);
     
-    // Get wallet address from config
-    const address = config.polymarket.address;
-    
     const headers: Record<string, string> = {
       'Accept': 'application/json',
       'Content-Type': 'application/json',
       'POLY_ADDRESS': address,
-      'POLY_API_KEY': apiKey,
-      'POLY_PASSPHRASE': passphrase,
+      'POLY_API_KEY': regularApiKey,
+      'POLY_PASSPHRASE': regularPassphrase,
       'POLY_SIGNATURE': signature,
       'POLY_TIMESTAMP': timestamp,
     };
 
     console.log(`   Making authenticated request to ${CLOB_API_URL}${path}`);
-    console.log(`   Headers: POLY_API_KEY=${apiKey.slice(0, 8)}..., POLY_ADDRESS=${address.slice(0, 10)}..., POLY_TIMESTAMP=${timestamp}`);
+    console.log(`   Headers: POLY_API_KEY=${regularApiKey.slice(0, 8)}..., POLY_ADDRESS=${address.slice(0, 10)}..., POLY_TIMESTAMP=${timestamp}`);
     
     const response = await fetch(`${CLOB_API_URL}${path}`, {
       method,
