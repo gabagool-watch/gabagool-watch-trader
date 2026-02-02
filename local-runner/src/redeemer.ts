@@ -22,7 +22,6 @@ import { config } from './config.js';
 import {
   getProvider,
   CTF_ADDRESS,
-  USDC_ADDRESS,
   parsePayoutRedemptionEvents,
   waitForTransaction,
   PayoutRedemptionEvent,
@@ -459,6 +458,7 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
 async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResult> {
   const conditionId = position.conditionId;
   const provider = getProvider();
+  const collateralToken = config.polymarket.usdcAddress;
 
   // Determine which wallet holds the position
   const positionWallet = (position.proxyWallet || '').toLowerCase();
@@ -551,7 +551,7 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
       // Encode the redeemPositions call
       const ctfInterface = new ethers.utils.Interface(CTF_REDEEM_ABI);
       const redeemCalldata = ctfInterface.encodeFunctionData('redeemPositions', [
-        USDC_ADDRESS,
+        collateralToken,
         parentCollectionId,
         conditionId,
         indexSets,
@@ -649,7 +649,7 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
       const ctfContract = new ethers.Contract(CTF_ADDRESS, CTF_REDEEM_ABI, wallet!);
       
       tx = await ctfContract.redeemPositions(
-        USDC_ADDRESS,
+        collateralToken,
         parentCollectionId,
         conditionId,
         indexSets,

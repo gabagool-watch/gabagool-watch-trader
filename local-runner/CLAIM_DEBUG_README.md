@@ -176,5 +176,19 @@ The system uses a mutex to prevent parallel claim attempts. If you see nonce err
 ### RPC errors
 The system automatically rotates between multiple RPC endpoints on failure with rate limit handling.
 
+### "Transaction reverted on-chain" (or "No PayoutRedemption events")
+This most commonly happens when the wrong collateral token address is used for `redeemPositions()`.
+
+Polymarket has used both **USDC.e (bridged)** and **native USDC** on Polygon over time.
+Set the collateral explicitly in your env file and restart:
+
+```bash
+# USDC.e (bridged) on Polygon
+POLYMARKET_USDC_ADDRESS=0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
+
+# Native USDC on Polygon (if Polymarket migrated)
+POLYMARKET_USDC_ADDRESS=0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359
+```
+
 ### Claims stuck as "pending"
 Run `npm run claim:debug` to see on-chain status vs API status. Indexer delays of 5-10 minutes are normal.
