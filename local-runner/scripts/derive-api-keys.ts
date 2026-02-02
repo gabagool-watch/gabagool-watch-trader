@@ -24,6 +24,7 @@ const CLOB_API_URL = 'https://clob.polymarket.com';
 const CHAIN_ID = 137; // Polygon mainnet
 
 const FORCE_CREATE = process.argv.includes('--create');
+const ALLOW_MISMATCH = process.argv.includes('--allow-mismatch');
 
 async function main() {
   console.log('\n🔑 DERIVE CLOB API CREDENTIALS');
@@ -67,6 +68,14 @@ async function main() {
       console.error(`   Config address:  ${address}`);
       console.error(`   Derived address: ${walletAddress}`);
       console.error(`   The private key does not match POLYMARKET_ADDRESS!`);
+
+      if (!ALLOW_MISMATCH) {
+        console.error(
+          '\n   Aborting by default (safety). If this mismatch is intentional, re-run with:'
+        );
+        console.error('   npx tsx scripts/derive-api-keys.ts --allow-mismatch');
+        process.exit(1);
+      }
     }
 
     // Initialize client without API credentials (we're deriving them)
@@ -113,7 +122,8 @@ async function main() {
     console.log('🎉 SUCCESS! Here are your L2 API credentials:');
     console.log('='.repeat(60));
     console.log('\nAdd these to your .env file:\n');
-    console.log(`POLYMARKET_API_KEY=${apiCreds.apiKey}`);
+    // clob-client returns ApiKeyCreds with fields: { key, secret, passphrase }
+    console.log(`POLYMARKET_API_KEY=${apiCreds.key}`);
     console.log(`POLYMARKET_API_SECRET=${apiCreds.secret}`);
     console.log(`POLYMARKET_PASSPHRASE=${apiCreds.passphrase}`);
     console.log('\n' + '='.repeat(60));
@@ -126,7 +136,7 @@ async function main() {
       CHAIN_ID,
       wallet, // Use same Wallet object
       {
-        key: apiCreds.apiKey,
+        key: apiCreds.key,
         secret: apiCreds.secret,
         passphrase: apiCreds.passphrase,
       },
@@ -134,8 +144,15 @@ async function main() {
     );
 
     // Try to get API keys to verify
-    const apiKeys = await testClient.getApiKeys();
-    console.log(`   ✅ Credentials verified! Found ${apiKeys.length} API key(s) for this wallet.`);
+    const apiKeysResp: any = await testClient.getApiKeys();
+    const apiKeysCount = Array.isArray(apiKeysResp)
+      ? apiKeysResp.length
+      : Array.isArray(apiKeysResp?.apiKeys)
+        ? apiKeysResp.apiKeys.length
+        : null;
+    console.log(
+      `   ✅ Credentials verified! Found ${apiKeysCount ?? 'unknown number of'} API key(s) for this wallet.`
+    );
 
   } catch (error: any) {
     console.error('\n❌ Failed to derive credentials:', error.message);
@@ -151,7 +168,5 @@ async function main() {
 
   console.log('\n✅ Done!\n');
 }
-
-main().catch(console.error);
 
 main().catch(console.error);
