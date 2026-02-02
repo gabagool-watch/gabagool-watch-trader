@@ -936,23 +936,23 @@ async function processMarket(market: V35Market): Promise<void> {
       const projectedMakerPrice = targetCpp - takerPrice;
       const projectedCpp = takerPrice + Math.max(0.05, projectedMakerPrice);
       
-      // V36.3.8: Calculate if maker is viable
-      const makerViable = cheapAsk <= projectedMakerPrice + 0.03;
+      // V36.8: Maker viability check is INFO ONLY (not a blocker)
+      // We place LIMIT orders - we don't care about current ask, we wait for market to come to us
       const makerGap = cheapAsk - projectedMakerPrice;
-      const makerViableIndicator = makerViable ? '✅' : '🚫';
+      const makerGapWarning = makerGap > 0.03 ? '⚠️' : '✅';
       
       log(`   📊 V36.3.8 Pair Analysis:`);
       log(`      TAKER ${expensiveSide} @ ~$${takerPrice.toFixed(3)} (market order)`);
       log(`      MAKER ${cheapSide} @ ~$${projectedMakerPrice.toFixed(3)} (after fill: $0.95 - fillPrice)`);
-      log(`      ${makerViableIndicator} Maker viability: ask $${cheapAsk.toFixed(3)} | gap ${(makerGap * 100).toFixed(1)}¢`);
+      log(`      ${makerGapWarning} Maker spread: ask $${cheapAsk.toFixed(3)} | gap ${(makerGap * 100).toFixed(1)}¢ (INFO ONLY)`);
       log(`      Target CPP: $${targetCpp.toFixed(3)} | Estimated: $${projectedCpp.toFixed(3)}`);
       
-      // V36.2: ALWAYS open pair if we can (no CPP check)
-      // V36.3.8: But now canOpenNewPair() includes unhedged exposure check!
+      // V36.8: ALWAYS open pair if CPP is viable - combined ask doesn't matter!
+      // We provide liquidity with limit orders, so edge is calculated on OUR prices, not market.
       if (pairTracker.canOpenNewPair()) {
         const pairSize = Math.max(5, Math.min(15, 10)); // 5-15 shares per pair
         
-        log(`   🎯 V36.3.8: Opening pair (maker viability: ${makerViable ? 'OK' : 'BLOCKED'})`);
+        log(`   🎯 V36.8: Opening pair (CPP-based, maker gap is INFO only)`);
         
         const pairResult = await pairTracker.openPair(market, expensiveSide, pairSize);
         
