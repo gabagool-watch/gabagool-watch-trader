@@ -46,6 +46,41 @@ const CTF_REDEEM_ABI = [
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] calldata indexSets) external',
 ];
 
+// Proxy wallet ABIs
+// Polymarket wallets can be either:
+//  - a simple proxy with execute(target, data)
+//  - a Gnosis Safe (common for smart-wallet setups)
+const PROXY_WALLET_EXECUTE_ABI = [
+  'function execute(address target, bytes calldata data) external returns (bytes memory)',
+];
+
+const GNOSIS_SAFE_ABI = [
+  'function nonce() view returns (uint256)',
+  'function getOwners() view returns (address[])',
+  'function getTransactionHash(address to,uint256 value,bytes data,uint8 operation,uint256 safeTxGas,uint256 baseGas,uint256 gasPrice,address gasToken,address refundReceiver,uint256 _nonce) view returns (bytes32)',
+  'function execTransaction(address to,uint256 value,bytes data,uint8 operation,uint256 safeTxGas,uint256 baseGas,uint256 gasPrice,address gasToken,address refundReceiver,bytes signatures) payable returns (bool success)',
+];
+
+type ProxyWalletKind = 'EXECUTE' | 'GNOSIS_SAFE';
+
+async function detectProxyWalletKind(proxyAddress: string, provider: any): Promise<ProxyWalletKind> {
+  // Allow explicit override via env
+  // 0 = EOA, 1 = POLY_PROXY (execute), 2 = GNOSIS_SAFE
+  if (config.polymarket.signatureType === 2) return 'GNOSIS_SAFE';
+  if (config.polymarket.signatureType === 1) return 'EXECUTE';
+
+  // Auto-detect: if getOwners() works, it's almost certainly a Safe.
+  try {
+    const safe = new ethers.Contract(proxyAddress, ['function getOwners() view returns (address[])'], provider);
+    const owners = await safe.getOwners();
+    if (Array.isArray(owners) && owners.length >= 1) return 'GNOSIS_SAFE';
+  } catch {
+    // fallthrough
+  }
+
+  return 'EXECUTE';
+}
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -486,8 +521,9 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
     
     const gasPriceGwei = parseFloat(ethers.utils.formatUnits(maxPriority, 'gwei'));
 
-    // Conservative default gas limit; avoid calling estimateGas when balance is low.
-    const conservativeGasLimit = ethers.BigNumber.from(350_000); // Slightly higher for proxy calls
+    // Conservative default gas limit; avoid relying on estimateGas (which can revert on proxy wallets).
+    const conservativeGasLimit = ethers.BigNumber.from(350_000); // proxy.execute path
+    const conservativeSafeGasLimit = ethers.BigNumber.from(900_000); // Safe execTransaction path
     const worstCaseCostWei = conservativeGasLimit.mul(maxFee);
 
     if (balanceWei.lt(worstCaseCostWei)) {
@@ -506,15 +542,8 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
     let tx: any;
 
     if (isClaimingViaProxy) {
-      // V35.11.0: For proxy wallet positions, call the proxy wallet's execute method
-      // to have it call redeemPositions on the CTF contract
-      // Polymarket proxy wallets have an execute(address target, bytes data) method
-      const PROXY_WALLET_ABI = [
-        'function execute(address target, bytes calldata data) external returns (bytes memory)',
-      ];
-      
-      const proxyContract = new ethers.Contract(claimFromWallet, PROXY_WALLET_ABI, wallet!);
-      
+      const proxyKind = await detectProxyWalletKind(claimFromWallet, provider);
+
       // Encode the redeemPositions call
       const ctfInterface = new ethers.utils.Interface(CTF_REDEEM_ABI);
       const redeemCalldata = ctfInterface.encodeFunctionData('redeemPositions', [
@@ -523,17 +552,71 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
         conditionId,
         indexSets,
       ]);
-      
-      console.log(`   📤 Calling proxy.execute(CTF, redeemPositions(...))`);
-      
-      tx = await proxyContract.execute(
-        CTF_ADDRESS,
-        redeemCalldata,
-        {
+
+      if (proxyKind === 'GNOSIS_SAFE') {
+        console.log(`   🔐 Detected proxy wallet type: GNOSIS_SAFE`);
+        console.log(`   📤 Calling safe.execTransaction(CTF, redeemPositions(...))`);
+
+        const safe = new ethers.Contract(claimFromWallet, GNOSIS_SAFE_ABI, wallet!);
+
+        const to = CTF_ADDRESS;
+        const value = 0;
+        const data = redeemCalldata;
+        const operation = 0; // CALL
+        const safeTxGas = 0; // let Safe handle; outer tx supplies gas
+        const baseGas = 0;
+        const gasPrice = 0;
+        const gasToken = ethers.constants.AddressZero;
+        const refundReceiver = ethers.constants.AddressZero;
+        const nonce = await safe.nonce();
+
+        const safeTxHash: string = await safe.getTransactionHash(
+          to,
+          value,
+          data,
+          operation,
+          safeTxGas,
+          baseGas,
+          gasPrice,
+          gasToken,
+          refundReceiver,
+          nonce
+        );
+
+        // Sign digest directly (EIP-712 style digest), NOT prefixed signMessage
+        // This produces the signature format Safe expects.
+        const sig = wallet!._signingKey().signDigest(safeTxHash);
+        const signatures = ethers.utils.joinSignature(sig);
+
+        tx = await safe.execTransaction(
+          to,
+          value,
+          data,
+          operation,
+          safeTxGas,
+          baseGas,
+          gasPrice,
+          gasToken,
+          refundReceiver,
+          signatures,
+          {
+            maxFeePerGas: maxFee,
+            maxPriorityFeePerGas: maxPriority,
+            gasLimit: conservativeSafeGasLimit,
+          }
+        );
+      } else {
+        console.log(`   🔐 Detected proxy wallet type: EXECUTE`);
+        console.log(`   📤 Calling proxy.execute(CTF, redeemPositions(...))`);
+
+        const proxyContract = new ethers.Contract(claimFromWallet, PROXY_WALLET_EXECUTE_ABI, wallet!);
+
+        tx = await proxyContract.execute(CTF_ADDRESS, redeemCalldata, {
           maxFeePerGas: maxFee,
           maxPriorityFeePerGas: maxPriority,
-        }
-      );
+          gasLimit: conservativeGasLimit,
+        });
+      }
     } else {
       // Direct EOA mode - signer is the token holder
       const ctfContract = new ethers.Contract(CTF_ADDRESS, CTF_REDEEM_ABI, wallet!);
@@ -546,6 +629,7 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
         {
           maxFeePerGas: maxFee,
           maxPriorityFeePerGas: maxPriority,
+          gasLimit: conservativeGasLimit,
         }
       );
     }
@@ -629,7 +713,7 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
     const lastEntry = claimTxHistory[claimTxHistory.length - 1];
     if (lastEntry && lastEntry.conditionId === conditionId) {
       lastEntry.status = 'failed';
-      lastEntry.error = msg;
+      lastEntry.error = classified.message;
     }
 
     return {
