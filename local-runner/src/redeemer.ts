@@ -41,13 +41,10 @@ import { reconcile, printReconciliationReport } from './reconcile.js';
 
 const DATA_API_URL = 'https://data-api.polymarket.com';
 
-// Relayer endpoints (Polymarket has used multiple host/path combinations over time).
-// We try the CLOB-hosted relayer first because it is typically reachable in the same network
-// setup as normal CLOB traffic.
-const RELAYER_ENDPOINTS: Array<{ label: string; baseUrl: string; executePath: string }> = [
-  { label: 'CLOB relayer', baseUrl: 'https://clob.polymarket.com', executePath: '/relayer/execute' },
-  { label: 'Relayer host', baseUrl: 'https://relayer.polymarket.com', executePath: '/execute' },
-];
+// NOTE: Polymarket Relayer API endpoints are deprecated/non-functional.
+// All redemptions now go through direct on-chain transactions.
+// Magic/Email wallets use the proxy wallet's execute() method.
+
 const DEFAULT_CLAIM_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MIN_CLAIM_THRESHOLD_USD = 0.10; // Minimum $0.10 to claim (gas efficiency)
 const MAX_RETRY_COUNT = 3;
@@ -520,216 +517,155 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
 }
 
 // ============================================================================
-// REDEEM: Relayer API method (for Magic/Email wallets - gasless)
-// Uses the official Polymarket Relayer API /execute endpoint
+// REDEEM: Magic/Email Proxy Wallet (via execute() method)
+// The signer can call the proxy wallet's execute() to redeem positions on-chain.
+// This replaces the deprecated Relayer API.
 // ============================================================================
 
-async function redeemViaRelayer(position: RedeemablePosition): Promise<ClaimResult> {
+async function redeemViaMagicProxy(position: RedeemablePosition): Promise<ClaimResult> {
   const conditionId = position.conditionId;
   const collateralToken = config.polymarket.usdcAddress;
   const proxyWallet = config.polymarket.address;
+  const provider = getProvider();
 
-  console.log(`   🌐 Using Relayer API (gasless) for Magic wallet`);
+  console.log(`   🔐 Redeeming via Magic proxy wallet (on-chain)`);
   console.log(`   📍 Proxy wallet: ${proxyWallet}`);
+  console.log(`   📍 Signer: ${wallet?.address}`);
   console.log(`   📍 Condition ID: ${conditionId}`);
-  console.log(`   📍 Collateral: ${collateralToken}`);
 
-  if (!hasBuilderCredentials()) {
-    console.log(`   ❌ Builder API credentials not configured!`);
-    console.log(`   💡 Set POLY_BUILDER_API_KEY, POLY_BUILDER_API_SECRET, POLY_BUILDER_PASSPHRASE`);
+  if (!wallet) {
     return {
       success: false,
-      error: 'Builder API credentials not configured',
+      error: 'Wallet not initialized',
       retryable: false,
-      errorCode: 'NO_BUILDER_CREDS',
+      errorCode: 'NO_WALLET',
     };
   }
 
-  // Build the CTF redeemPositions calldata once; only the relayer endpoint varies.
-  const indexSets = [1, 2]; // YES and NO outcome indices
-  const parentCollectionId = ethers.utils.hexZeroPad('0x00', 32);
-  const ctfInterface = new ethers.utils.Interface(CTF_REDEEM_ABI);
-  const redeemCalldata = ctfInterface.encodeFunctionData('redeemPositions', [
-    collateralToken,
-    parentCollectionId,
-    conditionId,
-    indexSets,
-  ]);
+  try {
+    // Build the CTF redeemPositions calldata
+    const indexSets = [1, 2]; // YES and NO outcome indices
+    const parentCollectionId = ethers.utils.hexZeroPad('0x00', 32);
+    const ctfInterface = new ethers.utils.Interface(CTF_REDEEM_ABI);
+    const redeemCalldata = ctfInterface.encodeFunctionData('redeemPositions', [
+      collateralToken,
+      parentCollectionId,
+      conditionId,
+      indexSets,
+    ]);
 
-  const redeemTx = {
-    to: CTF_ADDRESS,
-    data: redeemCalldata,
-    value: '0',
-  };
+    // Connect to the proxy wallet contract
+    const proxyContract = new ethers.Contract(proxyWallet, POLYMARKET_PROXY_WALLET_ABI, wallet);
 
-  const payload = {
-    transactions: [redeemTx],
-    description: `Claim winnings: ${position.title?.slice(0, 50) || conditionId.slice(0, 20)}`,
-  };
-
-  const bodyStr = JSON.stringify(payload);
-  const timestampSeconds = String(Math.floor(Date.now() / 1000));
-
-  const secretBytes = Buffer.from(sanitizeBase64Secret(config.polymarket.builderApiSecret), 'base64');
-
-  let lastFailure: ClaimResult | null = null;
-
-  for (const endpoint of RELAYER_ENDPOINTS) {
-    const requestPath = endpoint.executePath;
-    const signature = buildRelayerSignature(secretBytes, timestampSeconds, 'POST', requestPath, bodyStr);
-
+    // Verify ownership
     try {
-      console.log(`   📡 Relayer attempt: ${endpoint.label} → ${endpoint.baseUrl}${requestPath}`);
-
-      const response = await fetch(`${endpoint.baseUrl}${requestPath}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          POLY_ADDRESS: proxyWallet,
-          POLY_API_KEY: config.polymarket.builderApiKey,
-          POLY_PASSPHRASE: config.polymarket.builderPassphrase,
-          POLY_SIGNATURE: signature,
-          POLY_TIMESTAMP: timestampSeconds,
-        } as any,
-        body: bodyStr,
-      });
-
-      const responseText = await response.text();
-
-      // 404 strongly suggests “wrong path on this host” → try next endpoint.
-      if (response.status === 404) {
-        lastFailure = {
+      const owner = await proxyContract.owner();
+      const signerLower = wallet.address.toLowerCase();
+      const ownerLower = owner.toLowerCase();
+      
+      if (signerLower !== ownerLower) {
+        console.log(`   ⚠️ Signer (${signerLower}) is not owner (${ownerLower})`);
+        return {
           success: false,
-          error: `Relayer endpoint not found: ${endpoint.baseUrl}${requestPath}`,
+          error: `Signer is not the proxy wallet owner. Owner: ${owner}`,
           retryable: false,
-          errorCode: 'RELAYER_NOT_FOUND',
-        };
-        continue;
-      }
-
-      if (!response.ok) {
-        const isRateLimit = response.status === 429;
-        const isAuthError = response.status === 401 || response.status === 403;
-
-        return {
-          success: false,
-          error: `Relayer HTTP ${response.status}: ${responseText.slice(0, 150)}`,
-          retryable: isRateLimit,
-          errorCode: isAuthError ? 'AUTH_ERROR' : 'RELAYER_ERROR',
+          errorCode: 'NOT_OWNER',
         };
       }
+      console.log(`   ✅ Signer is proxy wallet owner`);
+    } catch (ownerErr: any) {
+      console.log(`   ⚠️ Could not verify ownership (proceeding anyway): ${ownerErr.message}`);
+    }
 
-      let result: any;
-      try {
-        result = JSON.parse(responseText);
-      } catch {
-        result = { raw: responseText };
-      }
-
-      console.log(`   ✅ Relayer accepted redemption request`);
-      console.log(`   📋 Response: ${JSON.stringify(result).slice(0, 300)}`);
-
-      const txHash = result?.transactionHash || result?.txHash || result?.hash || result?.id;
-
-      if (txHash) {
-        console.log(`   🔗 Transaction: ${txHash}`);
-
-        if (txHash.startsWith('0x') && txHash.length === 66) {
-          console.log(`   ⏳ Waiting for on-chain confirmation...`);
-          const receipt = await waitForTransaction(txHash, 1, 120000);
-
-          if (receipt && receipt.status === 1) {
-            const events = parsePayoutRedemptionEvents(receipt);
-            let totalPayout = position.currentValue || 0;
-
-            if (events.length > 0) {
-              totalPayout = events.reduce((sum, e) => sum + e.payoutUSDC, 0);
-              console.log(`   ✅ CONFIRMED: claimed $${totalPayout.toFixed(2)}`);
-            }
-
-            confirmedClaims.set(conditionId, {
-              txHash,
-              blockNumber: receipt.blockNumber,
-              payoutUSDC: totalPayout,
-              confirmedAt: Date.now(),
-            });
-
-            return {
-              success: true,
-              txHash,
-              blockNumber: receipt.blockNumber,
-              gasUsed: receipt.gasUsed?.toNumber(),
-              usdcReceived: totalPayout,
-            };
-          }
-
-          if (receipt && receipt.status === 0) {
-            return {
-              success: false,
-              txHash,
-              error: 'Transaction reverted on-chain',
-              retryable: false,
-            };
-          }
-        }
-
-        // If we can't confirm immediately, mark as pending success
-        confirmedClaims.set(conditionId, {
-          txHash,
-          blockNumber: 0,
-          payoutUSDC: position.currentValue || 0,
-          confirmedAt: Date.now(),
-        });
-
-        return {
-          success: true,
-          txHash,
-          usdcReceived: position.currentValue || 0,
-        };
-      }
-
-      if (result?.success || result?.status === 'success' || result?.status === 'queued' || result?.status === 'pending') {
-        console.log(`   ✅ Redemption queued by relayer`);
-
-        confirmedClaims.set(conditionId, {
-          txHash: 'relayer-queued',
-          blockNumber: 0,
-          payoutUSDC: position.currentValue || 0,
-          confirmedAt: Date.now(),
-        });
-
-        return {
-          success: true,
-          usdcReceived: position.currentValue || 0,
-        };
-      }
-
+    // Check signer balance for gas
+    const signerBalance = await provider.getBalance(wallet.address);
+    const minGasBalance = ethers.utils.parseEther('0.005'); // ~0.005 MATIC minimum
+    
+    if (signerBalance.lt(minGasBalance)) {
       return {
         success: false,
-        error: `Unexpected relayer response: ${JSON.stringify(result).slice(0, 150)}`,
-        retryable: true,
+        error: buildInsufficientFundsMessage(wallet.address),
+        retryable: false,
+        errorCode: 'INSUFFICIENT_FUNDS',
       };
-    } catch (error: any) {
-      const cause = error?.cause ? ` | cause=${String(error.cause)}` : '';
-      console.error(`   ❌ Relayer request failed (${endpoint.label}): ${error?.message || error}${cause}`);
-      lastFailure = {
-        success: false,
-        error: `${error?.message || 'Relayer request failed'}${cause}`,
-        retryable: true,
-        errorCode: 'RELAYER_FETCH_FAILED',
-      };
-      continue;
     }
-  }
 
-  return (
-    lastFailure ?? {
-      success: false,
-      error: 'Relayer request failed (no endpoints succeeded)',
-      retryable: true,
-      errorCode: 'RELAYER_ALL_FAILED',
+    // Get gas settings for Polygon
+    const feeData = await provider.getFeeData();
+    const MIN_PRIORITY_GWEI = 30;
+    const MIN_MAX_FEE_GWEI = 100;
+    
+    const minPriorityWei = ethers.utils.parseUnits(String(MIN_PRIORITY_GWEI), 'gwei');
+    const minMaxFeeWei = ethers.utils.parseUnits(String(MIN_MAX_FEE_GWEI), 'gwei');
+    
+    const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas?.gt(minPriorityWei)
+      ? feeData.maxPriorityFeePerGas
+      : minPriorityWei;
+    const maxFeePerGas = feeData.maxFeePerGas?.gt(minMaxFeeWei)
+      ? feeData.maxFeePerGas
+      : minMaxFeeWei;
+
+    console.log(`   ⛽ Gas: priority=${ethers.utils.formatUnits(maxPriorityFeePerGas, 'gwei')} gwei, max=${ethers.utils.formatUnits(maxFeePerGas, 'gwei')} gwei`);
+
+    // Execute the redemption through the proxy wallet
+    console.log(`   📡 Sending execute() transaction...`);
+    const tx = await proxyContract.execute(CTF_ADDRESS, redeemCalldata, {
+      maxPriorityFeePerGas,
+      maxFeePerGas,
+      gasLimit: 500000, // Generous limit for redemption
+    });
+
+    console.log(`   ⏳ Tx sent: ${tx.hash}`);
+    console.log(`   🔗 View: https://polygonscan.com/tx/${tx.hash}`);
+
+    // Wait for confirmation
+    const receipt = await tx.wait(1);
+
+    if (receipt.status === 1) {
+      const events = parsePayoutRedemptionEvents(receipt);
+      let totalPayout = position.currentValue || 0;
+
+      if (events.length > 0) {
+        totalPayout = events.reduce((sum: number, e: PayoutRedemptionEvent) => sum + e.payoutUSDC, 0);
+      }
+
+      console.log(`   ✅ CONFIRMED: claimed $${totalPayout.toFixed(2)}`);
+
+      confirmedClaims.set(conditionId, {
+        txHash: tx.hash,
+        blockNumber: receipt.blockNumber,
+        payoutUSDC: totalPayout,
+        confirmedAt: Date.now(),
+      });
+
+      return {
+        success: true,
+        txHash: tx.hash,
+        blockNumber: receipt.blockNumber,
+        gasUsed: receipt.gasUsed?.toNumber(),
+        gasPriceGwei: parseFloat(ethers.utils.formatUnits(receipt.effectiveGasPrice || 0, 'gwei')),
+        usdcReceived: totalPayout,
+      };
     }
-  );
+
+    return {
+      success: false,
+      txHash: tx.hash,
+      error: 'Transaction reverted on-chain',
+      retryable: false,
+      errorCode: 'TX_REVERTED',
+    };
+
+  } catch (error: any) {
+    const classified = classifyClaimError(error);
+    console.error(`   ❌ Proxy execute failed: ${classified.message}`);
+    return {
+      success: false,
+      error: classified.message,
+      retryable: classified.retryable,
+      errorCode: classified.code,
+    };
+  }
 }
 
 // ============================================================================
@@ -762,11 +698,11 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
     };
   }
 
-  // Check wallet type - for Magic/Email (POLY_PROXY with signatureType=1), use Relayer instead
+  // Check wallet type - for Magic/Email (POLY_PROXY with signatureType=1), use direct proxy execute
   const proxyKind = await detectProxyWalletKind(configProxy || signerWallet, provider);
-  if (proxyKind === 'POLY_PROXY' && hasBuilderCredentials()) {
-    console.log(`   🔄 Detected Magic wallet - switching to Relayer API`);
-    return redeemViaRelayer(position);
+  if (proxyKind === 'POLY_PROXY') {
+    console.log(`   🔄 Detected Magic wallet - using direct proxy execute()`);
+    return redeemViaMagicProxy(position);
   }
 
   // V35.12.2 FIX: ALWAYS claim via proxy if configProxy is set and differs from signer
