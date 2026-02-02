@@ -12,7 +12,7 @@
 import { config } from '../src/config.js';
 import crypto from 'node:crypto';
 
-const RELAYER_URL = 'https://relayer.polymarket.com';
+const CLOB_API_URL = 'https://clob.polymarket.com';
 
 function toUrlSafeBase64(b64: string): string {
   return b64.replace(/\+/g, '-').replace(/\//g, '_');
@@ -86,32 +86,32 @@ async function main() {
     process.exit(1);
   }
 
-  // Step 3: Test Relayer API connectivity (simple health check)
-  console.log('\n📋 STEP 3: Testing Relayer API connectivity...');
+  // Step 3: Test CLOB API connectivity (simple health check)
+  console.log('\n📋 STEP 3: Testing CLOB API connectivity...');
   
   try {
-    // First, test basic connectivity to the relayer
-    const response = await fetch(`${RELAYER_URL}/`, {
+    // First, test basic connectivity to the CLOB API
+    const response = await fetch(`${CLOB_API_URL}/`, {
       method: 'GET',
       headers: { 'Accept': 'application/json' },
     });
     
     console.log(`   Response status: ${response.status} ${response.statusText}`);
     
-    if (response.ok || response.status === 404) {
-      // 404 is fine - means we reached the server but endpoint doesn't exist
-      console.log('   ✅ Relayer API is reachable!');
+    if (response.ok || response.status === 404 || response.status === 405) {
+      // 404/405 is fine - means we reached the server but endpoint doesn't exist
+      console.log('   ✅ CLOB API is reachable!');
     } else {
       const text = await response.text();
       console.log(`   Response body: ${text.slice(0, 200)}`);
     }
   } catch (e) {
-    console.error(`   ❌ Cannot reach Relayer API: ${e}`);
+    console.error(`   ❌ Cannot reach CLOB API: ${e}`);
     console.error('   This might be a network/DNS issue on the VPS.');
   }
 
   // Step 4: Test authenticated endpoint
-  console.log('\n📋 STEP 4: Testing authenticated Relayer API call...');
+  console.log('\n📋 STEP 4: Testing authenticated CLOB API call...');
   
   try {
     const sanitizedSecret = sanitizeBase64Secret(apiSecret);
@@ -130,10 +130,10 @@ async function main() {
       'POLY_TIMESTAMP': timestamp,
     };
 
-    console.log(`   Making authenticated request to ${RELAYER_URL}${path}`);
+    console.log(`   Making authenticated request to ${CLOB_API_URL}${path}`);
     console.log(`   Headers: POLY_API_KEY=${apiKey.slice(0, 8)}..., POLY_TIMESTAMP=${timestamp}`);
     
-    const response = await fetch(`${RELAYER_URL}${path}`, {
+    const response = await fetch(`${CLOB_API_URL}${path}`, {
       method,
       headers,
     });
@@ -166,12 +166,12 @@ async function main() {
   console.log(`   POLYMARKET_SIGNATURE_TYPE: ${config.polymarket.signatureType ?? 'not set'}`);
   
   if (config.polymarket.signatureType === 1) {
-    console.log('   ✅ Set to 1 (POLY_PROXY / Magic wallet) - Relayer API will be used');
+    console.log('   ✅ Set to 1 (POLY_PROXY / Magic wallet) - CLOB API with Builder creds will be used');
   } else if (config.polymarket.signatureType === undefined) {
     console.log('   ⚠️ Not set - will auto-detect wallet type');
-    console.log('   💡 TIP: Set POLYMARKET_SIGNATURE_TYPE=1 in .env to force Relayer API');
+    console.log('   💡 TIP: Set POLYMARKET_SIGNATURE_TYPE=1 in .env to force CLOB API with Builder creds');
   } else {
-    console.log(`   ℹ️ Set to ${config.polymarket.signatureType} - may not use Relayer API`);
+    console.log(`   ℹ️ Set to ${config.polymarket.signatureType} - may use direct on-chain method`);
   }
 
   console.log('\n' + '='.repeat(60));
