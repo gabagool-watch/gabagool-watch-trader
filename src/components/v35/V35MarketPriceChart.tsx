@@ -11,6 +11,7 @@ interface V35MarketPriceChartProps {
   marketSlug: string;
   startTs: number; // Window start timestamp in ms
   endTs: number;   // Window end timestamp in ms
+  targetCpp?: number; // Target CPP (default 0.95) - used for "price to beat" line
 }
 
 interface PriceTick {
@@ -32,8 +33,11 @@ interface ChartPoint {
   strike: number | null;
 }
 
-export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs }: V35MarketPriceChartProps) {
+export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetCpp = 0.95 }: V35MarketPriceChartProps) {
   const isLive = Date.now() < endTs && Date.now() >= startTs;
+  
+  // Price to beat: if each side averages this, the pair totals targetCpp
+  const priceToBeat = targetCpp / 2;
   const [liveData, setLiveData] = useState<PriceTick[]>([]);
 
   // Fetch historical ticks from database
@@ -302,6 +306,20 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs }: V35Ma
                   stroke="hsl(var(--muted-foreground))" 
                   strokeDasharray="3 3"
                   strokeOpacity={0.5}
+                />
+                
+                {/* Price to beat line */}
+                <ReferenceLine 
+                  y={priceToBeat} 
+                  stroke="hsl(var(--warning))" 
+                  strokeDasharray="5 5"
+                  strokeWidth={2}
+                  label={{ 
+                    value: `Beat: ${(priceToBeat * 100).toFixed(1)}¢`, 
+                    position: 'right', 
+                    fontSize: 9,
+                    fill: 'hsl(var(--warning))'
+                  }}
                 />
                 
                 <Line 
