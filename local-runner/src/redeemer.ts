@@ -481,14 +481,18 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
     };
   }
 
-  // V35.11.0 FIX: Determine which wallet to claim FROM
-  // For proxy wallets, the shares are held in the PROXY wallet, not the signer.
-  // The CTF contract needs msg.sender to be the token holder.
-  // For Magic/Email accounts, Polymarket uses a ProxyWallet contract where:
-  //   - The "funder" (proxy address) holds the conditional tokens
-  //   - The signer can execute transactions on behalf of the funder via execute()
-  const claimFromWallet = positionWallet === signerWallet ? signerWallet : configProxy;
-  const isClaimingViaProxy = claimFromWallet !== signerWallet && claimFromWallet.length > 0;
+  // V35.12.2 FIX: ALWAYS claim via proxy if configProxy is set and differs from signer
+  // The tokens are held in the PROXY wallet, not the signer wallet.
+  // The CTF contract requires msg.sender to be the token holder.
+  // 
+  // CRITICAL: We must use proxyWallet.execute(CTF, redeemPositions(...)) so that
+  // the proxy wallet becomes msg.sender in the CTF contract, NOT the signer.
+  //
+  // Previous bug: We were calling CTF.redeemPositions() directly from signer,
+  // which resulted in payout=0 because the signer has no tokens.
+  const hasProxyWallet = configProxy.length > 0 && configProxy !== signerWallet;
+  const claimFromWallet = hasProxyWallet ? configProxy : signerWallet;
+  const isClaimingViaProxy = hasProxyWallet;
 
   console.log(`   🎯 Claiming from: ${claimFromWallet.slice(0, 10)}... (${isClaimingViaProxy ? 'via proxy' : 'direct EOA'})`);
 
