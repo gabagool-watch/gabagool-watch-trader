@@ -116,14 +116,20 @@ async function main() {
   try {
     const sanitizedSecret = sanitizeBase64Secret(apiSecret);
     const secretBytes = Buffer.from(sanitizedSecret, 'base64');
-    const timestamp = Math.floor(Date.now() / 1000).toString();
+    // IMPORTANT: Polymarket uses MILLISECONDS, not seconds!
+    const timestamp = Date.now().toString();
     const method = 'GET';
     const path = '/auth/api-keys'; // Standard auth check endpoint
     
     const signature = buildRelayerSignature(secretBytes, timestamp, method, path);
     
+    // Get wallet address from config
+    const address = config.polymarket.address;
+    
     const headers: Record<string, string> = {
       'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'POLY_ADDRESS': address,
       'POLY_API_KEY': apiKey,
       'POLY_PASSPHRASE': passphrase,
       'POLY_SIGNATURE': signature,
@@ -131,7 +137,7 @@ async function main() {
     };
 
     console.log(`   Making authenticated request to ${CLOB_API_URL}${path}`);
-    console.log(`   Headers: POLY_API_KEY=${apiKey.slice(0, 8)}..., POLY_TIMESTAMP=${timestamp}`);
+    console.log(`   Headers: POLY_API_KEY=${apiKey.slice(0, 8)}..., POLY_ADDRESS=${address.slice(0, 10)}..., POLY_TIMESTAMP=${timestamp}`);
     
     const response = await fetch(`${CLOB_API_URL}${path}`, {
       method,
