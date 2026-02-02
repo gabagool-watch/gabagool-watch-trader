@@ -17,6 +17,7 @@
  */
 
 import { ClobClient } from '@polymarket/clob-client';
+import { Wallet } from 'ethers';
 import { config } from '../src/config.js';
 
 const CLOB_API_URL = 'https://clob.polymarket.com';
@@ -55,11 +56,24 @@ async function main() {
   console.log('\n📡 Initializing CLOB client...');
   
   try {
+    // Create a Wallet from the private key
+    const wallet = new Wallet(privateKey);
+    const walletAddress = await wallet.getAddress();
+    
+    console.log(`   Wallet address from key: ${walletAddress}`);
+    
+    if (walletAddress.toLowerCase() !== address.toLowerCase()) {
+      console.error(`\n   ⚠️ WARNING: Wallet address mismatch!`);
+      console.error(`   Config address:  ${address}`);
+      console.error(`   Derived address: ${walletAddress}`);
+      console.error(`   The private key does not match POLYMARKET_ADDRESS!`);
+    }
+
     // Initialize client without API credentials (we're deriving them)
     const clobClient = new ClobClient(
       CLOB_API_URL,
       CHAIN_ID,
-      privateKey as `0x${string}`,
+      wallet, // Pass Wallet object, not raw key
       undefined, // No API creds yet
       signatureType
     );
@@ -104,13 +118,13 @@ async function main() {
     console.log(`POLYMARKET_PASSPHRASE=${apiCreds.passphrase}`);
     console.log('\n' + '='.repeat(60));
 
-    // Test the new credentials
+    // Test the credentials
     console.log('\n📋 Testing credentials...');
     
     const testClient = new ClobClient(
       CLOB_API_URL,
       CHAIN_ID,
-      privateKey as `0x${string}`,
+      wallet, // Use same Wallet object
       {
         key: apiCreds.apiKey,
         secret: apiCreds.secret,
