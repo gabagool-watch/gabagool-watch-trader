@@ -385,3 +385,154 @@ export async function fetchChainlinkPrice(asset: 'BTC' | 'ETH'): Promise<Chainli
     return null;
   }
 }
+
+// ===========================================================
+// POLYMARKET PROXY WALLET – Owner detection
+// ===========================================================
+
+// Polymarket ProxyWallet uses ProxyWalletLib which stores owner at a specific slot
+// The slot is: keccak256("polymarket.proxy.owner") - but we can also try common patterns
+
+const PROXY_WALLET_ABI = [
+  'function owner() view returns (address)',
+  'function getOwner() view returns (address)',
+];
+
+// Gnosis Safe ABI for ownership check
+const GNOSIS_SAFE_ABI = [
+  'function getOwners() view returns (address[])',
+  'function isOwner(address owner) view returns (bool)',
+];
+
+export interface ProxyOwnerInfo {
+  proxyAddress: string;
+  ownerAddress: string | null;
+  proxyType: 'polymarket' | 'gnosis' | 'unknown';
+  isOwnedBy: (address: string) => boolean;
+  gnosisOwners?: string[];
+  error?: string;
+}
+
+/**
+ * Detect the owner of a Polymarket proxy wallet or Gnosis Safe
+ */
+export async function getProxyOwner(proxyAddress: string): Promise<ProxyOwnerInfo> {
+  await throttleRpc();
+  const provider = getProvider();
+  
+  const result: ProxyOwnerInfo = {
+    proxyAddress: proxyAddress.toLowerCase(),
+    ownerAddress: null,
+    proxyType: 'unknown',
+    isOwnedBy: () => false,
+  };
+  
+  try {
+    // Try 1: Standard owner() call
+    const proxyContract = new ethers.Contract(proxyAddress, PROXY_WALLET_ABI, provider);
+    
+    try {
+      const owner = await proxyContract.owner();
+      if (owner && owner !== ethers.constants.AddressZero) {
+        result.ownerAddress = owner.toLowerCase();
+        result.proxyType = 'polymarket';
+        result.isOwnedBy = (addr: string) => addr.toLowerCase() === result.ownerAddress;
+        console.log(`✅ Proxy owner (via owner()): ${result.ownerAddress}`);
+        return result;
+      }
+    } catch {}
+    
+    // Try 2: getOwner() call (some Polymarket proxies)
+    try {
+      const owner = await proxyContract.getOwner();
+      if (owner && owner !== ethers.constants.AddressZero) {
+        result.ownerAddress = owner.toLowerCase();
+        result.proxyType = 'polymarket';
+        result.isOwnedBy = (addr: string) => addr.toLowerCase() === result.ownerAddress;
+        console.log(`✅ Proxy owner (via getOwner()): ${result.ownerAddress}`);
+        return result;
+      }
+    } catch {}
+    
+    // Try 3: Gnosis Safe pattern
+    const safeContract = new ethers.Contract(proxyAddress, GNOSIS_SAFE_ABI, provider);
+    try {
+      const owners = await safeContract.getOwners();
+      if (owners && owners.length > 0) {
+        result.proxyType = 'gnosis';
+        result.gnosisOwners = owners.map((o: string) => o.toLowerCase());
+        result.ownerAddress = result.gnosisOwners[0]; // Primary owner
+        result.isOwnedBy = (addr: string) => 
+          result.gnosisOwners?.includes(addr.toLowerCase()) ?? false;
+        console.log(`✅ Gnosis Safe owners: ${result.gnosisOwners.join(', ')}`);
+        return result;
+      }
+    } catch {}
+    
+    // Try 4: Read storage slot directly (EIP-1967 admin slot)
+    // Admin slot: bytes32(uint256(keccak256('eip1967.proxy.admin')) - 1)
+    const EIP1967_ADMIN_SLOT = '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103';
+    try {
+      const storageValue = await provider.getStorageAt(proxyAddress, EIP1967_ADMIN_SLOT);
+      const adminAddress = ethers.utils.getAddress('0x' + storageValue.slice(26));
+      if (adminAddress !== ethers.constants.AddressZero) {
+        result.ownerAddress = adminAddress.toLowerCase();
+        result.proxyType = 'polymarket';
+        result.isOwnedBy = (addr: string) => addr.toLowerCase() === result.ownerAddress;
+        console.log(`✅ Proxy admin (via EIP-1967 slot): ${result.ownerAddress}`);
+        return result;
+      }
+    } catch {}
+    
+    // Try 5: Custom Polymarket slot - keccak256("polymarket.proxy.owner")
+    const POLYMARKET_OWNER_SLOT = ethers.utils.keccak256(
+      ethers.utils.toUtf8Bytes("polymarket.proxy.owner")
+    );
+    try {
+      const storageValue = await provider.getStorageAt(proxyAddress, POLYMARKET_OWNER_SLOT);
+      const ownerFromSlot = ethers.utils.getAddress('0x' + storageValue.slice(26));
+      if (ownerFromSlot !== ethers.constants.AddressZero) {
+        result.ownerAddress = ownerFromSlot.toLowerCase();
+        result.proxyType = 'polymarket';
+        result.isOwnedBy = (addr: string) => addr.toLowerCase() === result.ownerAddress;
+        console.log(`✅ Proxy owner (via Polymarket slot): ${result.ownerAddress}`);
+        return result;
+      }
+    } catch {}
+    
+    // Try 6: Read first few storage slots (slot 0 often has owner in simple proxies)
+    for (let slot = 0; slot < 5; slot++) {
+      try {
+        const storageValue = await provider.getStorageAt(proxyAddress, slot);
+        // Check if it looks like an address (20 bytes, non-zero)
+        if (storageValue.length === 66 && storageValue !== ethers.constants.HashZero) {
+          const potentialAddr = '0x' + storageValue.slice(26);
+          if (potentialAddr !== '0x0000000000000000000000000000000000000000') {
+            try {
+              const checksumAddr = ethers.utils.getAddress(potentialAddr);
+              // Verify it's a valid address by checking code
+              const code = await provider.getCode(checksumAddr);
+              // If it has no code, it might be an EOA owner
+              if (code === '0x') {
+                result.ownerAddress = checksumAddr.toLowerCase();
+                result.proxyType = 'polymarket';
+                result.isOwnedBy = (addr: string) => addr.toLowerCase() === result.ownerAddress;
+                console.log(`✅ Potential owner found in slot ${slot}: ${result.ownerAddress}`);
+                return result;
+              }
+            } catch {}
+          }
+        }
+      } catch {}
+    }
+    
+    result.error = 'Could not determine proxy owner';
+    console.log(`⚠️ Could not determine owner for proxy ${proxyAddress}`);
+    return result;
+    
+  } catch (e) {
+    handleRpcError(e);
+    result.error = e instanceof Error ? e.message : String(e);
+    return result;
+  }
+}
