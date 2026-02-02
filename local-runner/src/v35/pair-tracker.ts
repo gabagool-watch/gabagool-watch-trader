@@ -43,6 +43,8 @@ import { logV35GuardEvent, logPairEvent, saveV35Fill } from './backend.js';
 import { getV35Config } from './config.js';
 // CRITICAL: Register our order IDs so fills are recognized as ours!
 import { registerOurOrderId } from './user-ws.js';
+// V36.6: Import reversal detector for capacity boost during reversals
+import { getReversalDetector } from './reversal-detector.js';
 
 // ============================================================
 // TYPES
@@ -318,7 +320,6 @@ export class PairTracker {
     }
     
     // V36.6: Check for active reversal → use higher capacity
-    const { getReversalDetector } = require('./reversal-detector.js');
     const reversalDetector = getReversalDetector();
     const isReversalActive = reversalDetector.isReversalActive();
     const effectiveMax = isReversalActive 
