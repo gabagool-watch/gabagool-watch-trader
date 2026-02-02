@@ -231,18 +231,18 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
               }}
             />
             
-            {/* Strike price reference line */}
+            {/* Strike price = Price to Beat reference line */}
             {strikePrice && (
               <ReferenceLine 
                 y={strikePrice} 
-                stroke="hsl(var(--primary))" 
+                stroke="hsl(var(--warning))" 
                 strokeDasharray="5 5"
                 strokeWidth={2}
                 label={{ 
-                  value: 'Strike', 
+                  value: 'Price to Beat', 
                   position: 'right', 
-                  fontSize: 9,
-                  fill: 'hsl(var(--primary))'
+                  fontSize: 10,
+                  fill: 'hsl(var(--warning))'
                 }}
               />
             )}
@@ -306,20 +306,6 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
                   stroke="hsl(var(--muted-foreground))" 
                   strokeDasharray="3 3"
                   strokeOpacity={0.5}
-                />
-                
-                {/* Price to beat line */}
-                <ReferenceLine 
-                  y={priceToBeat} 
-                  stroke="hsl(var(--warning))" 
-                  strokeDasharray="5 5"
-                  strokeWidth={2}
-                  label={{ 
-                    value: `Beat: ${(priceToBeat * 100).toFixed(1)}¢`, 
-                    position: 'right', 
-                    fontSize: 9,
-                    fill: 'hsl(var(--warning))'
-                  }}
                 />
                 
                 <Line 
