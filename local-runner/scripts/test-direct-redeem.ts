@@ -25,6 +25,7 @@ const CTF_REDEEM_ABI = [
 ];
 
 const POLYMARKET_PROXY_WALLET_ABI = [
+  'function proxy(address dest, bytes calldata data) external returns (bytes memory)',
   'function execute(address to, bytes data) external returns (bytes)',
   'function owner() view returns (address)',
 ];
@@ -114,14 +115,14 @@ async function main() {
     process.exit(1);
   }
 
-  // Preflight: simulate proxy.execute()
-  console.log('\n🧪 Preflight 2: Simulating proxy.execute()...');
+  // Preflight: simulate proxy.proxy() - the correct function for Polymarket proxies
+  console.log('\n🧪 Preflight 2: Simulating proxy.proxy()...');
   const proxyContract = new ethers.Contract(proxyWallet, POLYMARKET_PROXY_WALLET_ABI, wallet);
   try {
-    await proxyContract.callStatic.execute(CTF_ADDRESS, redeemCalldata);
-    console.log('   ✅ proxy.execute() would succeed (authorization OK)');
+    await proxyContract.callStatic.proxy(CTF_ADDRESS, redeemCalldata);
+    console.log('   ✅ proxy.proxy() would succeed (authorization OK)');
   } catch (err: any) {
-    console.error('   ❌ proxy.execute() would REVERT:');
+    console.error('   ❌ proxy.proxy() would REVERT:');
     console.error(`      ${err.reason || err.message || err}`);
     console.error('   This means: signer is not authorized on this proxy wallet');
     process.exit(1);
@@ -129,7 +130,7 @@ async function main() {
 
   // Estimate gas
   console.log('\n⛽ Estimating gas...');
-  const gasEstimate = await proxyContract.estimateGas.execute(CTF_ADDRESS, redeemCalldata);
+  const gasEstimate = await proxyContract.estimateGas.proxy(CTF_ADDRESS, redeemCalldata);
   console.log(`   Estimated gas: ${gasEstimate.toString()}`);
 
   const feeData = await provider.getFeeData();
@@ -147,9 +148,9 @@ async function main() {
   console.log(`   2. Pay ~${(gasEstimate.toNumber() * 100 / 1e9).toFixed(4)} MATIC in gas`);
   console.log(`   3. Redeem winning shares for condition ${conditionId.slice(0, 20)}...`);
 
-  // Actually send the transaction
+  // Actually send the transaction using proxy() - the correct function
   console.log('\n📡 Sending transaction...');
-  const tx = await proxyContract.execute(CTF_ADDRESS, redeemCalldata, {
+  const tx = await proxyContract.proxy(CTF_ADDRESS, redeemCalldata, {
     maxPriorityFeePerGas,
     maxFeePerGas,
     gasLimit: gasEstimate.mul(130).div(100), // 30% buffer
