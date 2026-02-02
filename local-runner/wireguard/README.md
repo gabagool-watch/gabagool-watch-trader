@@ -77,6 +77,24 @@ docker exec trading-bot curl -s https://api.ipify.org
 
 ---
 
+## Manual Claim Testing (inside container)
+
+You must run test scripts **inside the `trading-bot` container** to use the VPN:
+```bash
+# SSH into VPS, then:
+docker exec -it trading-bot sh
+
+# Inside container:
+npx tsx scripts/test-relayer-redeem-v2.ts <conditionId>
+```
+
+Or as a one-liner from the host:
+```bash
+docker exec -it trading-bot npx tsx scripts/test-relayer-redeem-v2.ts <conditionId>
+```
+
+---
+
 ## Troubleshooting
 
 1. **Check WireGuard is connected:**
