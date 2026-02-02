@@ -46,13 +46,12 @@ const CTF_REDEEM_ABI = [
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] calldata indexSets) external',
 ];
 
-// ProxyWalletFactory address on Polygon (used by Magic/Email logins)
-// This is the contract that deployed proxy wallets and can execute transactions on their behalf
-const PROXY_WALLET_FACTORY_ADDRESS = '0xaB45c5A4B0c941a2F231C04C3f49182e1A254052';
-
-// ProxyWalletFactory ABI - the proxy() method executes transactions on behalf of the proxy wallet
-const PROXY_WALLET_FACTORY_ABI = [
-  'function proxy(tuple(address to, uint8 typeCode, bytes data, uint256 value)[] calls) external',
+// Polymarket Proxy Wallet ABI (for Magic/Email logins)
+// The proxy wallet itself has an execute() method that only the owner (signer) can call
+// This is different from the ProxyWalletFactory which only deploys wallets
+const POLYMARKET_PROXY_WALLET_ABI = [
+  'function execute(address to, bytes data) external returns (bytes)',
+  'function owner() view returns (address)',
 ];
 
 const GNOSIS_SAFE_ABI = [
@@ -608,25 +607,34 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
         );
       } else {
         // POLY_PROXY: Polymarket Proxy Wallet (Magic/Email login)
-        // The tokens are held by the proxy wallet, but we claim via the ProxyWalletFactory
-        // The factory's proxy() method executes transactions on behalf of the proxy wallet
+        // The tokens are held by the proxy wallet. The signer (owner) can call
+        // proxy.execute(to, data) to make the proxy wallet interact with any contract.
+        // This makes msg.sender = proxy wallet in the CTF contract, which is correct!
         console.log(`   🔐 Detected proxy wallet type: POLY_PROXY (Magic/Email)`);
-        console.log(`   📤 Calling ProxyWalletFactory.proxy([{to: CTF, data: redeemPositions(...)}])`);
+        console.log(`   📤 Calling proxyWallet.execute(CTF, redeemPositions(...))`);
+        console.log(`   📍 Proxy wallet address: ${claimFromWallet}`);
 
-        const factory = new ethers.Contract(PROXY_WALLET_FACTORY_ADDRESS, PROXY_WALLET_FACTORY_ABI, wallet!);
+        const proxyWallet = new ethers.Contract(claimFromWallet, POLYMARKET_PROXY_WALLET_ABI, wallet!);
 
-        // The factory.proxy() method takes an array of calls to execute
-        // typeCode: 1 = CALL (vs 0 = DELEGATE_CALL)
-        const calls = [
-          {
-            to: CTF_ADDRESS,
-            typeCode: 1, // CALL
-            data: redeemCalldata,
-            value: 0,
+        // Verify that the signer is the owner of the proxy wallet
+        try {
+          const owner = await proxyWallet.owner();
+          console.log(`   📍 Proxy owner: ${owner}`);
+          if (owner.toLowerCase() !== wallet!.address.toLowerCase()) {
+            console.log(`   ❌ Signer is not the owner of the proxy wallet!`);
+            console.log(`   💡 Ensure your POLYMARKET_PRIVATE_KEY is from the same account that owns this proxy.`);
+            return {
+              success: false,
+              error: `Signer ${wallet!.address} is not the owner of proxy ${claimFromWallet}. Owner is ${owner}.`,
+              retryable: false,
+              errorCode: 'NOT_OWNER',
+            };
           }
-        ];
+        } catch (ownerErr) {
+          console.log(`   ⚠️ Could not verify proxy ownership (proceeding anyway): ${ownerErr}`);
+        }
 
-        tx = await factory.proxy(calls, {
+        tx = await proxyWallet.execute(CTF_ADDRESS, redeemCalldata, {
           maxFeePerGas: maxFee,
           maxPriorityFeePerGas: maxPriority,
           gasLimit: conservativeGasLimit,

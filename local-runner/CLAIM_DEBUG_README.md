@@ -122,22 +122,24 @@ claim_usdc NUMERIC
 
 ## Proxy Wallet Mode
 
-### V35.12.0 Update: ProxyWalletFactory Claiming
+### V35.12.1 Update: Direct Proxy Wallet Claiming
 
-Previous versions incorrectly tried to call `proxy.execute()` directly on the proxy wallet, but Polymarket proxy wallets (Magic/Email logins) use a different architecture - they require the **ProxyWalletFactory** contract.
+Previous versions incorrectly tried to use `ProxyWalletFactory.proxy()`, but that doesn't work because it makes the factory the `msg.sender` in the CTF contract, not the proxy wallet.
 
-**How it works:**
-- Polymarket Magic/Email accounts use a ProxyWalletFactory pattern
-- The factory deployed your proxy wallet and is the only contract that can execute transactions on its behalf
-- For proxy positions, we now call `ProxyWalletFactory.proxy([{to: CTF, data: redeemPositions(...)}])`
-- The factory forwards the call to the proxy wallet, which then interacts with the CTF contract
+**How it actually works:**
+- Polymarket Magic/Email accounts use a Proxy Wallet pattern
+- The proxy wallet has an `execute(address to, bytes data)` function
+- Only the owner (your signer wallet) can call this function
+- When you call `proxyWallet.execute(CTF, redeemPositions(...))`, the proxy wallet becomes `msg.sender` in the CTF contract
+- This allows the CTF to correctly verify that the caller owns the tokens
 
 **Wallet architecture (Magic/Email accounts):**
 ```
-Signer (EOA) ─────► ProxyWalletFactory ─────► Proxy Wallet ─────► CTF Contract
-    │                      │                       │                    │
-    │ pays gas             │ routes call           │ holds tokens       │ redeems
-    └──────────────────────┴───────────────────────┴────────────────────┘
+Signer (EOA) ─────► Proxy Wallet ─────► CTF Contract
+    │                    │                   │
+    │ calls execute()    │ becomes msg.sender│ redeems tokens
+    │ pays gas           │ holds tokens      │
+    └────────────────────┴───────────────────┘
 ```
 
 **For Browser wallets (MetaMask, etc.):**
