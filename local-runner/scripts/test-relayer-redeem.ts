@@ -3,7 +3,7 @@
  * 
  * Usage: npx tsx scripts/test-relayer-redeem.ts [conditionId]
  * 
- * Tests the Relayer API /execute endpoint for claiming positions.
+ * Tests multiple Polymarket API endpoints for claiming positions.
  * If no conditionId is provided, it will fetch and display claimable positions.
  */
 
@@ -13,7 +13,11 @@ import pkg from 'ethers';
 const { ethers } = pkg;
 import crypto from 'node:crypto';
 
-const RELAYER_API_URL = 'https://relayer.polymarket.com';
+// Possible endpoints to try
+const ENDPOINTS = [
+  'https://clob.polymarket.com',      // Main CLOB API
+  'https://gamma-api.polymarket.com', // Gamma API
+];
 const CTF_ADDRESS = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
 const DATA_API_URL = 'https://data-api.polymarket.com';
 
@@ -92,7 +96,6 @@ async function testRelayerRedeem(conditionId: string): Promise<void> {
   console.log(`📍 Proxy wallet: ${proxyWallet}`);
   console.log(`📍 Condition ID: ${conditionId}`);
   console.log(`📍 Collateral: ${collateralToken}`);
-  console.log(`📍 Relayer URL: ${RELAYER_API_URL}`);
 
   // Check credentials
   if (!config.polymarket.builderApiKey || !config.polymarket.builderApiSecret || !config.polymarket.builderPassphrase) {
@@ -122,89 +125,106 @@ async function testRelayerRedeem(conditionId: string): Promise<void> {
   console.log(`   data: ${redeemCalldata.slice(0, 66)}...`);
   console.log(`   value: 0`);
 
-  // Build the relayer request
-  const redeemTx = {
-    to: CTF_ADDRESS,
-    data: redeemCalldata,
-    value: '0',
-  };
+  // Try multiple endpoints and paths
+  const pathsToTry = [
+    '/execute',
+    '/relay/execute', 
+    '/v1/execute',
+    '/order',  // Maybe orders endpoint accepts redeems?
+  ];
 
-  const requestPath = '/execute';
-  const payload = {
-    transactions: [redeemTx],
-    description: `Test claim: ${conditionId.slice(0, 20)}...`,
-  };
-
-  const bodyStr = JSON.stringify(payload);
-  const timestampSeconds = String(Math.floor(Date.now() / 1000));
-
-  const secretBytes = Buffer.from(
-    sanitizeBase64Secret(config.polymarket.builderApiSecret),
-    'base64'
-  );
-  const signature = buildRelayerSignature(
-    secretBytes,
-    timestampSeconds,
-    'POST',
-    requestPath,
-    bodyStr
-  );
-
-  console.log(`\n📡 Sending to Relayer API...`);
-  console.log(`   Timestamp: ${timestampSeconds}`);
-  console.log(`   Signature: ${signature.slice(0, 20)}...`);
-
-  try {
-    const response = await fetch(`${RELAYER_API_URL}${requestPath}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'POLY_ADDRESS': proxyWallet,
-        'POLY_API_KEY': config.polymarket.builderApiKey,
-        'POLY_PASSPHRASE': config.polymarket.builderPassphrase,
-        'POLY_SIGNATURE': signature,
-        'POLY_TIMESTAMP': timestampSeconds,
-      },
-      body: bodyStr,
-    });
-
-    const responseText = await response.text();
+  for (const baseUrl of ENDPOINTS) {
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`🔗 Testing endpoint: ${baseUrl}`);
     
-    console.log(`\n📥 Response:`);
-    console.log(`   Status: ${response.status} ${response.statusText}`);
-    console.log(`   Body: ${responseText.slice(0, 500)}`);
-
-    if (!response.ok) {
-      console.error(`\n❌ Relayer request failed!`);
-      
-      if (response.status === 401 || response.status === 403) {
-        console.error(`   💡 Authentication error - check your Builder credentials`);
-      } else if (response.status === 400) {
-        console.error(`   💡 Bad request - check the payload format`);
-      } else if (response.status === 404) {
-        console.error(`   💡 Endpoint not found - the Relayer API may have changed`);
-      }
-      return;
-    }
-
-    let result: any;
+    // First, test if endpoint is reachable
     try {
-      result = JSON.parse(responseText);
-    } catch {
-      result = { raw: responseText };
+      const healthCheck = await fetch(`${baseUrl}/`, { method: 'GET' });
+      console.log(`   Health check: ${healthCheck.status} ${healthCheck.statusText}`);
+    } catch (e: any) {
+      console.log(`   ❌ Endpoint not reachable: ${e.message}`);
+      continue;
     }
 
-    console.log(`\n✅ Relayer accepted the request!`);
-    
-    const txHash = result?.transactionHash || result?.txHash || result?.hash || result?.id;
-    if (txHash) {
-      console.log(`   🔗 Transaction: ${txHash}`);
-      console.log(`   📍 View on PolygonScan: https://polygonscan.com/tx/${txHash}`);
-    }
+    for (const path of pathsToTry) {
+      console.log(`\n   📡 Trying ${path}...`);
 
-  } catch (error: any) {
-    console.error(`\n❌ Request failed: ${error.message}`);
+      const redeemTx = {
+        to: CTF_ADDRESS,
+        data: redeemCalldata,
+        value: '0',
+      };
+
+      const payload = {
+        transactions: [redeemTx],
+        description: `Test claim: ${conditionId.slice(0, 20)}...`,
+      };
+
+      const bodyStr = JSON.stringify(payload);
+      const timestampSeconds = String(Math.floor(Date.now() / 1000));
+
+      const secretBytes = Buffer.from(
+        sanitizeBase64Secret(config.polymarket.builderApiSecret),
+        'base64'
+      );
+      const signature = buildRelayerSignature(
+        secretBytes,
+        timestampSeconds,
+        'POST',
+        path,
+        bodyStr
+      );
+
+      try {
+        const response = await fetch(`${baseUrl}${path}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'POLY_ADDRESS': proxyWallet,
+            'POLY_API_KEY': config.polymarket.builderApiKey,
+            'POLY_PASSPHRASE': config.polymarket.builderPassphrase,
+            'POLY_SIGNATURE': signature,
+            'POLY_TIMESTAMP': timestampSeconds,
+          },
+          body: bodyStr,
+        });
+
+        const responseText = await response.text();
+        
+        console.log(`      Status: ${response.status} ${response.statusText}`);
+        console.log(`      Body: ${responseText.slice(0, 300)}`);
+
+        if (response.ok) {
+          console.log(`\n   ✅ SUCCESS! Found working endpoint: ${baseUrl}${path}`);
+          
+          let result: any;
+          try {
+            result = JSON.parse(responseText);
+          } catch {
+            result = { raw: responseText };
+          }
+          
+          const txHash = result?.transactionHash || result?.txHash || result?.hash || result?.id;
+          if (txHash) {
+            console.log(`   🔗 Transaction: ${txHash}`);
+            console.log(`   📍 View on PolygonScan: https://polygonscan.com/tx/${txHash}`);
+          }
+          return;
+        }
+
+      } catch (e: any) {
+        console.log(`      ❌ Error: ${e.message}`);
+      }
+    }
   }
+
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`❌ No working endpoint found for relayer redemptions.`);
+  console.log(`\n💡 The Polymarket Relayer API might require:`);
+  console.log(`   - Special access/whitelisting for builders`);
+  console.log(`   - A different authentication method`);
+  console.log(`   - Using the CLOB SDK directly instead of raw HTTP`);
+  console.log(`\n📚 Check Polymarket Builder docs: https://docs.polymarket.com/`);
 }
 
 async function main() {
