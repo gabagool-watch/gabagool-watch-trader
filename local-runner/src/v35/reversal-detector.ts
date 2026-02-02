@@ -62,6 +62,10 @@ export class ReversalDetector {
   // V36.2: Track price history for $30 detection
   private priceHistory: Map<V35Asset, { price: number; ts: number }[]> = new Map();
   
+  // V36.6: Track active reversals per market for capacity boost
+  private activeReversals: Map<string, { detectedAt: number; asset: V35Asset }> = new Map();
+  private reversalActiveWindowMs = 30_000; // Reversal stays "active" for 30s
+  
   constructor(config: Partial<ReversalDetectorConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
@@ -177,6 +181,10 @@ export class ReversalDetector {
     console.log(`[ReversalDetector]    Binance: $${oldestPrice.toFixed(0)} → $${currentPrice.toFixed(0)} (${direction} $${absPriceChange.toFixed(0)} in ${this.config.reversalWindowMs}ms)`);
     console.log(`[ReversalDetector]    Our position: ${pair.takerSide} is now at risk!`);
     
+    // V36.6: Mark reversal as active for this market (enables extra pair capacity)
+    this.activeReversals.set(market.slug, { detectedAt: now, asset: market.asset });
+    console.log(`[ReversalDetector] 🔓 V36.6: Reversal active for ${market.slug} - extra pair capacity enabled for 30s`);
+    
     // Log the event
     logV35GuardEvent({
       marketSlug: market.slug,
@@ -206,12 +214,40 @@ export class ReversalDetector {
   }
   
   /**
+   * V36.6: Check if any reversal is currently active (for extra pair capacity)
+   * A reversal stays "active" for 30 seconds after detection.
+   */
+  isReversalActive(): boolean {
+    const now = Date.now();
+    
+    // Clean up expired reversals
+    for (const [slug, info] of this.activeReversals.entries()) {
+      if (now - info.detectedAt > this.reversalActiveWindowMs) {
+        this.activeReversals.delete(slug);
+        console.log(`[ReversalDetector] 🔒 V36.6: Reversal expired for ${slug} - returning to normal capacity`);
+      }
+    }
+    
+    return this.activeReversals.size > 0;
+  }
+  
+  /**
+   * V36.6: Get count of active reversals
+   */
+  getActiveReversalCount(): number {
+    // Trigger cleanup via isReversalActive
+    this.isReversalActive();
+    return this.activeReversals.size;
+  }
+  
+  /**
    * Get status summary
    */
   getStatus(): {
     lastCheckMs: number;
     lastEmergencyMs: number;
     priceHistorySize: Record<string, number>;
+    activeReversals: number;
   } {
     const priceHistorySize: Record<string, number> = {};
     
@@ -223,6 +259,7 @@ export class ReversalDetector {
       lastCheckMs: this.lastCheckMs,
       lastEmergencyMs: this.lastEmergencyMs,
       priceHistorySize,
+      activeReversals: this.getActiveReversalCount(),
     };
   }
   
@@ -240,6 +277,7 @@ export class ReversalDetector {
     this.lastCheckMs = 0;
     this.lastEmergencyMs = 0;
     this.priceHistory.clear();
+    this.activeReversals.clear();
   }
 }
 

@@ -108,6 +108,7 @@ export interface PendingPair {
 
 export interface PairTrackerConfig {
   maxPendingPairs: number;           // Max concurrent pairs
+  maxPendingPairsReversal: number;   // V36.6: Extra capacity during reversal
   targetCpp: number;                 // Target combined cost (e.g., 0.95)
   emergencyMaxCpp: number;           // Max combined cost for emergency hedge
   emergencyTakerOffset: number;      // Offset above ask for emergency (e.g., 0.005)
@@ -119,6 +120,7 @@ export interface PairTrackerConfig {
 
 const DEFAULT_CONFIG: PairTrackerConfig = {
   maxPendingPairs: 5,               // V36.5.0: 5 concurrent pairs for better throughput
+  maxPendingPairsReversal: 8,       // V36.6: +3 extra pairs during reversal (5 + 3)
   targetCpp: 0.95,
   emergencyMaxCpp: 1.05,
   emergencyTakerOffset: 0.005,
@@ -287,6 +289,8 @@ export class PairTracker {
    * V36.3.8 CRITICAL FIX: Block new pairs if too many are WAITING_HEDGE!
    * This was the root cause of massive losses - bot kept placing takers
    * while makers weren't being filled, creating huge unhedged exposure.
+   * 
+   * V36.6: During active reversal, allow +3 extra pairs to recover
    */
   canOpenNewPair(): boolean {
     const activePairs = this.getActivePairs();
@@ -313,12 +317,25 @@ export class PairTracker {
       return false;
     }
     
-    if (count >= this.config.maxPendingPairs) {
-      console.log(`[PairTracker] 🛑 Max pairs reached: ${count}/${this.config.maxPendingPairs} (pending=${pending}, waiting=${waiting})`);
+    // V36.6: Check for active reversal → use higher capacity
+    const { getReversalDetector } = require('./reversal-detector.js');
+    const reversalDetector = getReversalDetector();
+    const isReversalActive = reversalDetector.isReversalActive();
+    const effectiveMax = isReversalActive 
+      ? this.config.maxPendingPairsReversal 
+      : this.config.maxPendingPairs;
+    
+    if (count >= effectiveMax) {
+      const modeLabel = isReversalActive ? 'REVERSAL MODE' : 'normal';
+      console.log(`[PairTracker] 🛑 Max pairs reached: ${count}/${effectiveMax} [${modeLabel}] (pending=${pending}, waiting=${waiting})`);
       return false;
     }
     
-    console.log(`[PairTracker] ✅ Can open pair: ${count}/${this.config.maxPendingPairs} (pending=${pending}, waiting=${waiting})`);
+    if (isReversalActive) {
+      console.log(`[PairTracker] ✅ Can open pair: ${count}/${effectiveMax} [REVERSAL MODE +3] (pending=${pending}, waiting=${waiting})`);
+    } else {
+      console.log(`[PairTracker] ✅ Can open pair: ${count}/${effectiveMax} (pending=${pending}, waiting=${waiting})`);
+    }
     return true;
   }
   
