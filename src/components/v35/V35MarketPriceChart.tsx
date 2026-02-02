@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/integrations/supabase/client';
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, CartesianGrid, Legend } from 'recharts';
 import { Skeleton } from '@/components/ui/skeleton';
 import { AlertCircle, TrendingUp, TrendingDown, Activity } from 'lucide-react';
@@ -39,7 +39,19 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
   // Price to beat: if each side averages this, the pair totals targetCpp
   const priceToBeat = targetCpp / 2;
   const [liveData, setLiveData] = useState<PriceTick[]>([]);
-
+  
+  // Synchronized tooltip state for both charts
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  
+  const handleMouseMove = useCallback((state: any) => {
+    if (state?.activeTooltipIndex !== undefined) {
+      setActiveIndex(state.activeTooltipIndex);
+    }
+  }, []);
+  
+  const handleMouseLeave = useCallback(() => {
+    setActiveIndex(null);
+  }, []);
   // Fetch historical ticks from database
   const { data: historicalTicks, isLoading, error } = useQuery<PriceTick[]>({
     queryKey: ['v35-price-ticks', marketSlug],
@@ -227,7 +239,12 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
       {/* Main spot price chart */}
       <div className="h-36">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+          <LineChart 
+            data={chartData} 
+            margin={{ top: 5, right: 10, left: 0, bottom: 0 }}
+            onMouseMove={handleMouseMove}
+            onMouseLeave={handleMouseLeave}
+          >
             <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
             <XAxis 
               dataKey="relativeTime"
@@ -245,6 +262,7 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
               width={70}
             />
             <Tooltip 
+              active={activeIndex !== null}
               contentStyle={{ 
                 backgroundColor: 'hsl(var(--card))', 
                 border: '1px solid hsl(var(--border))',
@@ -293,7 +311,12 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
           <div className="text-xs text-muted-foreground px-1">Share Prices (UP/DOWN mid)</div>
           <div className="h-24">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+              <LineChart 
+                data={chartData} 
+                margin={{ top: 5, right: 10, left: 0, bottom: 0 }}
+                onMouseMove={handleMouseMove}
+                onMouseLeave={handleMouseLeave}
+              >
                 <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
                 <XAxis 
                   dataKey="relativeTime"
@@ -311,6 +334,7 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
                   width={35}
                 />
                 <Tooltip 
+                  active={activeIndex !== null}
                   contentStyle={{ 
                     backgroundColor: 'hsl(var(--card))', 
                     border: '1px solid hsl(var(--border))',
