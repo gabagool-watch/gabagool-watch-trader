@@ -3,7 +3,13 @@
  * ============================================================================
  * 
  * Automatic on-chain claiming for resolved Polymarket markets.
- * Claims happen permissionlessly on-chain via ConditionalTokens contract.
+ * 
+ * For Magic/Email wallets (signature_type=1):
+ *   Uses the Polymarket Relayer API for gasless redemptions
+ *   Requires Builder API credentials (POLY_BUILDER_*)
+ * 
+ * For EOA/Browser wallets:
+ *   Direct on-chain CTF.redeemPositions() calls
  * 
  * Features:
  * - Periodic detection of resolved markets (configurable interval)
@@ -12,11 +18,12 @@
  * - Safety guardrails (no double claims, min threshold, retry logic)
  * - Event-based confirmation (PayoutRedemption events)
  * 
- * @version 2.0.0
+ * @version 3.0.0 - Added Relayer API support for Magic wallets
  */
 
 import pkg from 'ethers';
 const { ethers, Wallet } = pkg;
+import crypto from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import { config } from './config.js';
 import {
@@ -33,6 +40,7 @@ import { reconcile, printReconciliationReport } from './reconcile.js';
 // ============================================================================
 
 const DATA_API_URL = 'https://data-api.polymarket.com';
+const RELAYER_URL = 'https://relayer.polymarket.com'; // Polymarket Relayer endpoint
 const DEFAULT_CLAIM_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MIN_CLAIM_THRESHOLD_USD = 0.10; // Minimum $0.10 to claim (gas efficiency)
 const MAX_RETRY_COUNT = 3;
@@ -60,11 +68,52 @@ const GNOSIS_SAFE_ABI = [
   'function execTransaction(address to,uint256 value,bytes data,uint8 operation,uint256 safeTxGas,uint256 baseGas,uint256 gasPrice,address gasToken,address refundReceiver,bytes signatures) payable returns (bool success)',
 ];
 
-type ProxyWalletKind = 'POLY_PROXY' | 'GNOSIS_SAFE';
+type ProxyWalletKind = 'POLY_PROXY' | 'GNOSIS_SAFE' | 'EOA';
+
+// ============================================================================
+// RELAYER API SUPPORT (for Magic/Email wallets)
+// ============================================================================
+
+function hasBuilderCredentials(): boolean {
+  return Boolean(
+    config.polymarket.builderApiKey &&
+    config.polymarket.builderApiSecret &&
+    config.polymarket.builderPassphrase
+  );
+}
+
+function toUrlSafeBase64(b64: string): string {
+  return b64.replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+function sanitizeBase64Secret(secret: string): string {
+  let s = secret.trim()
+    .replace(/-/g, '+')
+    .replace(/_/g, '/')
+    .replace(/[^A-Za-z0-9+/=]/g, '');
+
+  const pad = s.length % 4;
+  if (pad === 2) s += '==';
+  if (pad === 3) s += '=';
+  return s;
+}
+
+function buildRelayerSignature(
+  secretBytes: Buffer,
+  timestampSeconds: string,
+  method: string,
+  requestPath: string,
+  body: string = ''
+): string {
+  const message = `${timestampSeconds}${method.toUpperCase()}${requestPath}${body}`;
+  const digest = crypto.createHmac('sha256', secretBytes).update(message).digest();
+  return toUrlSafeBase64(Buffer.from(digest).toString('base64'));
+}
 
 async function detectProxyWalletKind(proxyAddress: string, provider: any): Promise<ProxyWalletKind> {
   // Allow explicit override via env
   // 0 = EOA, 1 = POLY_PROXY (Magic/Email), 2 = GNOSIS_SAFE (Browser wallet)
+  if (config.polymarket.signatureType === 0) return 'EOA';
   if (config.polymarket.signatureType === 2) return 'GNOSIS_SAFE';
   if (config.polymarket.signatureType === 1) return 'POLY_PROXY';
 
@@ -452,7 +501,150 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
 }
 
 // ============================================================================
-// REDEEM: Direct EOA method
+// REDEEM: Relayer API method (for Magic/Email wallets - gasless)
+// ============================================================================
+
+async function redeemViaRelayer(position: RedeemablePosition): Promise<ClaimResult> {
+  const conditionId = position.conditionId;
+  const collateralToken = config.polymarket.usdcAddress;
+  const proxyWallet = config.polymarket.address;
+
+  console.log(`   🌐 Using Relayer API (gasless) for Magic wallet`);
+  console.log(`   📍 Proxy wallet: ${proxyWallet}`);
+  console.log(`   📍 Condition ID: ${conditionId}`);
+
+  if (!hasBuilderCredentials()) {
+    console.log(`   ❌ Builder API credentials not configured!`);
+    console.log(`   💡 Set POLY_BUILDER_API_KEY, POLY_BUILDER_API_SECRET, POLY_BUILDER_PASSPHRASE`);
+    return {
+      success: false,
+      error: 'Builder API credentials not configured',
+      retryable: false,
+      errorCode: 'NO_BUILDER_CREDS',
+    };
+  }
+
+  try {
+    const indexSets = [1, 2]; // YES and NO outcome indices
+    const parentCollectionId = ethers.utils.hexZeroPad('0x00', 32);
+
+    // Build the redemption request payload
+    const requestPath = '/redeem';
+    const payload = {
+      collateralToken: collateralToken,
+      conditionId: conditionId,
+      indexSets: indexSets,
+      parentCollectionId: parentCollectionId,
+    };
+
+    const bodyStr = JSON.stringify(payload);
+    const timestampSeconds = String(Math.floor(Date.now() / 1000));
+
+    // Sign the request
+    const secretBytes = Buffer.from(
+      sanitizeBase64Secret(config.polymarket.builderApiSecret),
+      'base64'
+    );
+    const signature = buildRelayerSignature(
+      secretBytes,
+      timestampSeconds,
+      'POST',
+      requestPath,
+      bodyStr
+    );
+
+    console.log(`   📡 Sending redemption request to Relayer...`);
+
+    const response = await fetch(`${RELAYER_URL}${requestPath}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'POLY_ADDRESS': proxyWallet,
+        'POLY_API_KEY': config.polymarket.builderApiKey,
+        'POLY_PASSPHRASE': config.polymarket.builderPassphrase,
+        'POLY_SIGNATURE': signature,
+        'POLY_TIMESTAMP': timestampSeconds,
+      },
+      body: bodyStr,
+    });
+
+    const responseText = await response.text();
+    
+    if (!response.ok) {
+      console.log(`   ❌ Relayer returned HTTP ${response.status}`);
+      console.log(`   Response: ${responseText.slice(0, 200)}`);
+      
+      // Check for specific error types
+      const isRateLimit = response.status === 429;
+      const isAuthError = response.status === 401 || response.status === 403;
+      
+      return {
+        success: false,
+        error: `Relayer HTTP ${response.status}: ${responseText.slice(0, 100)}`,
+        retryable: isRateLimit,
+        errorCode: isAuthError ? 'AUTH_ERROR' : 'RELAYER_ERROR',
+      };
+    }
+
+    let result: any;
+    try {
+      result = JSON.parse(responseText);
+    } catch {
+      result = { raw: responseText };
+    }
+
+    console.log(`   ✅ Relayer accepted redemption request`);
+    console.log(`   📋 Response: ${JSON.stringify(result).slice(0, 200)}`);
+
+    // The relayer returns a transaction hash or task ID
+    const txHash = result?.transactionHash || result?.txHash || result?.hash || result?.taskId;
+
+    if (txHash) {
+      console.log(`   🔗 Transaction/Task: ${txHash}`);
+      
+      // For relayer transactions, we may not have immediate confirmation
+      // Log as pending and let the next cycle verify
+      confirmedClaims.set(conditionId, {
+        txHash: txHash,
+        blockNumber: 0, // Will be updated on confirmation
+        payoutUSDC: position.currentValue || 0,
+        confirmedAt: Date.now(),
+      });
+
+      return {
+        success: true,
+        txHash: txHash,
+        usdcReceived: position.currentValue || 0,
+      };
+    }
+
+    // Even without txHash, if status is success, consider it done
+    if (result?.success || result?.status === 'success' || result?.status === 'queued') {
+      console.log(`   ✅ Redemption queued successfully`);
+      return {
+        success: true,
+        usdcReceived: position.currentValue || 0,
+      };
+    }
+
+    return {
+      success: false,
+      error: `Unexpected relayer response: ${JSON.stringify(result).slice(0, 100)}`,
+      retryable: true,
+    };
+
+  } catch (error: any) {
+    console.error(`   ❌ Relayer request failed: ${error.message}`);
+    return {
+      success: false,
+      error: error.message || 'Relayer request failed',
+      retryable: true,
+    };
+  }
+}
+
+// ============================================================================
+// REDEEM: Direct EOA/Gnosis method (non-Magic wallets)
 // ============================================================================
 
 async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResult> {
@@ -465,7 +657,7 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
   const signerWallet = (wallet?.address || '').toLowerCase();
   const configProxy = (config.polymarket.address || '').toLowerCase();
   
-  console.log(`   🔧 Claiming position...`);
+  console.log(`   🔧 Claiming position (on-chain)...`);
   console.log(`   📍 Position held by: ${positionWallet.slice(0, 10)}...`);
   console.log(`   📍 Signer wallet: ${signerWallet.slice(0, 10)}...`);
   console.log(`   📍 Config proxy: ${configProxy.slice(0, 10) || 'not set'}...`);
@@ -481,15 +673,14 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
     };
   }
 
+  // Check wallet type - for Magic/Email (POLY_PROXY with signatureType=1), use Relayer instead
+  const proxyKind = await detectProxyWalletKind(configProxy || signerWallet, provider);
+  if (proxyKind === 'POLY_PROXY' && hasBuilderCredentials()) {
+    console.log(`   🔄 Detected Magic wallet - switching to Relayer API`);
+    return redeemViaRelayer(position);
+  }
+
   // V35.12.2 FIX: ALWAYS claim via proxy if configProxy is set and differs from signer
-  // The tokens are held in the PROXY wallet, not the signer wallet.
-  // The CTF contract requires msg.sender to be the token holder.
-  // 
-  // CRITICAL: We must use proxyWallet.execute(CTF, redeemPositions(...)) so that
-  // the proxy wallet becomes msg.sender in the CTF contract, NOT the signer.
-  //
-  // Previous bug: We were calling CTF.redeemPositions() directly from signer,
-  // which resulted in payout=0 because the signer has no tokens.
   const hasProxyWallet = configProxy.length > 0 && configProxy !== signerWallet;
   const claimFromWallet = hasProxyWallet ? configProxy : signerWallet;
   const isClaimingViaProxy = hasProxyWallet;
@@ -611,38 +802,40 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
         );
       } else {
         // POLY_PROXY: Polymarket Proxy Wallet (Magic/Email login)
-        // The tokens are held by the proxy wallet. The signer (owner) can call
-        // proxy.execute(to, data) to make the proxy wallet interact with any contract.
-        // This makes msg.sender = proxy wallet in the CTF contract, which is correct!
+        // For Magic wallets, we MUST use the Relayer API because the proxy
+        // doesn't recognize our signer as the owner (factory-deployed proxy)
         console.log(`   🔐 Detected proxy wallet type: POLY_PROXY (Magic/Email)`);
-        console.log(`   📤 Calling proxyWallet.execute(CTF, redeemPositions(...))`);
+        
+        if (hasBuilderCredentials()) {
+          console.log(`   🔄 Using Relayer API for Magic wallet redemption`);
+          return redeemViaRelayer(position);
+        }
+        
+        // Fallback: try direct call (will likely fail for Magic wallets)
+        console.log(`   ⚠️ No Builder credentials - attempting direct proxy.execute() (may fail)`);
+        console.log(`   💡 Configure POLY_BUILDER_* credentials for reliable Magic wallet claims`);
         console.log(`   📍 Proxy wallet address: ${claimFromWallet}`);
 
         const proxyWallet = new ethers.Contract(claimFromWallet, POLYMARKET_PROXY_WALLET_ABI, wallet!);
 
-        // Verify that the signer is the owner of the proxy wallet
+        // Try the direct call as fallback
         try {
-          const owner = await proxyWallet.owner();
-          console.log(`   📍 Proxy owner: ${owner}`);
-          if (owner.toLowerCase() !== wallet!.address.toLowerCase()) {
-            console.log(`   ❌ Signer is not the owner of the proxy wallet!`);
-            console.log(`   💡 Ensure your POLYMARKET_PRIVATE_KEY is from the same account that owns this proxy.`);
-            return {
-              success: false,
-              error: `Signer ${wallet!.address} is not the owner of proxy ${claimFromWallet}. Owner is ${owner}.`,
-              retryable: false,
-              errorCode: 'NOT_OWNER',
-            };
-          }
-        } catch (ownerErr) {
-          console.log(`   ⚠️ Could not verify proxy ownership (proceeding anyway): ${ownerErr}`);
+          tx = await proxyWallet.execute(CTF_ADDRESS, redeemCalldata, {
+            maxFeePerGas: maxFee,
+            maxPriorityFeePerGas: maxPriority,
+            gasLimit: conservativeGasLimit,
+          });
+        } catch (execErr: any) {
+          console.log(`   ❌ proxy.execute() failed: ${execErr.message}`);
+          console.log(`   💡 Magic wallets require Builder API credentials for redemption.`);
+          console.log(`   💡 Set: POLY_BUILDER_API_KEY, POLY_BUILDER_API_SECRET, POLY_BUILDER_PASSPHRASE`);
+          return {
+            success: false,
+            error: `Magic wallet requires Relayer API. Configure POLY_BUILDER_* credentials.`,
+            retryable: false,
+            errorCode: 'NEED_BUILDER_CREDS',
+          };
         }
-
-        tx = await proxyWallet.execute(CTF_ADDRESS, redeemCalldata, {
-          maxFeePerGas: maxFee,
-          maxPriorityFeePerGas: maxPriority,
-          gasLimit: conservativeGasLimit,
-        });
       }
     } else {
       // Direct EOA mode - signer is the token holder
