@@ -142,11 +142,19 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
     });
   }, [allTicks, startTs]);
 
-  // Get strike price - prefer from strike_prices table, fallback to ticks
+  // Get strike price - use FIRST spot price from ticks as "Price to Beat"
+  // This ensures consistency: the chart shows Binance spot prices, so we use
+  // the first Binance spot price as the baseline (same data source = no mismatch)
   const strikePrice = useMemo(() => {
-    // First try from dedicated strike_prices table
+    // Use the first tick's spot price as the "Price to Beat" (market opening price)
+    // This is the same source as the chart line, so they'll always be consistent
+    const firstTick = allTicks[0];
+    if (firstTick?.spot_price != null) return firstTick.spot_price;
+    
+    // Fallback 1: strike_prices table (may have source mismatch but better than nothing)
     if (strikePriceData != null) return strikePriceData;
-    // Fallback to tick data
+    
+    // Fallback 2: tick data strike_price column
     const tickWithStrike = allTicks.find((t) => t.strike_price != null);
     return tickWithStrike?.strike_price ?? null;
   }, [strikePriceData, allTicks]);
