@@ -47,7 +47,7 @@ const DATA_API_URL = 'https://data-api.polymarket.com';
 // Magic/Email wallets use the proxy wallet's execute() method.
 
 const DEFAULT_CLAIM_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-const MIN_CLAIM_THRESHOLD_USD = 0.10; // Minimum $0.10 to claim (gas efficiency)
+const MIN_CLAIM_THRESHOLD_USD = 0.001; // Lower threshold to claim dust positions too
 const MAX_RETRY_COUNT = 3;
 const RETRY_BACKOFF_MS = 30000; // 30 seconds between retries
 const BATCH_SIZE = 5; // Max positions to claim per batch
