@@ -545,6 +545,145 @@ async function buildIndexSetsForCondition(conditionId: string, provider: any): P
   }
 }
 
+// ============================================================================
+// FETCH PROXY ADDRESS FROM POLYMARKET API
+// Same approach as working test-direct-redeem-v2.ts script
+// ============================================================================
+
+async function fetchProxyAddressFromAPI(walletAddress: string): Promise<string | null> {
+  try {
+    const response = await fetch(`${DATA_API_URL}/profile?address=${walletAddress}`);
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data?.proxyAddress ? ethers.utils.getAddress(data.proxyAddress) : null;
+  } catch {
+    return null;
+  }
+}
+
+// ============================================================================
+// REDEEM: Direct CTF redemption (works when signer has no proxy or is the proxy)
+// This mirrors the successful test-direct-redeem-v2.ts approach
+// ============================================================================
+
+async function redeemDirectCTF(position: RedeemablePosition): Promise<ClaimResult> {
+  const conditionId = position.conditionId;
+  const collateralToken = config.polymarket.usdcAddress;
+  const provider = getProvider();
+  const signerAddress = wallet?.address || '';
+
+  console.log(`   🎯 Redeeming via DIRECT CTF.redeemPositions()`);
+  console.log(`   📍 Signer: ${signerAddress}`);
+  console.log(`   📍 Condition ID: ${conditionId}`);
+
+  if (!wallet) {
+    return {
+      success: false,
+      error: 'Wallet not initialized',
+      retryable: false,
+      errorCode: 'NO_WALLET',
+    };
+  }
+
+  try {
+    // Build the CTF redeemPositions calldata
+    const indexSets = await buildIndexSetsForCondition(conditionId, provider);
+    const parentCollectionId = ethers.utils.hexZeroPad('0x00', 32);
+
+    // Check signer balance for gas
+    const signerBalance = await provider.getBalance(wallet.address);
+    const minGasBalance = ethers.utils.parseEther('0.01'); // ~0.01 MATIC minimum
+    
+    if (signerBalance.lt(minGasBalance)) {
+      return {
+        success: false,
+        error: buildInsufficientFundsMessage(wallet.address),
+        retryable: false,
+        errorCode: 'INSUFFICIENT_FUNDS',
+      };
+    }
+
+    // Gas settings - use high minimums for Polygon (same as test script)
+    const feeData = await provider.getFeeData();
+    const minPriority = ethers.utils.parseUnits('30', 'gwei');
+    const minMaxFee = ethers.utils.parseUnits('100', 'gwei');
+    const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas?.gt(minPriority) 
+      ? feeData.maxPriorityFeePerGas.mul(130).div(100) 
+      : minPriority;
+    const maxFeePerGas = feeData.maxFeePerGas?.gt(minMaxFee)
+      ? feeData.maxFeePerGas.mul(130).div(100)
+      : minMaxFee;
+
+    console.log(`   ⛽ Gas: priority=${ethers.utils.formatUnits(maxPriorityFeePerGas, 'gwei')} gwei, max=${ethers.utils.formatUnits(maxFeePerGas, 'gwei')} gwei`);
+
+    // Call CTF.redeemPositions directly
+    const ctfContract = new ethers.Contract(CTF_ADDRESS, CTF_REDEEM_ABI, wallet);
+    
+    console.log(`   📡 Sending CTF.redeemPositions() transaction...`);
+    const tx = await ctfContract.redeemPositions(
+      collateralToken,
+      parentCollectionId,
+      conditionId,
+      indexSets,
+      { maxPriorityFeePerGas, maxFeePerGas }
+    );
+
+    console.log(`   ⏳ Tx sent: ${tx.hash}`);
+    console.log(`   🔗 View: https://polygonscan.com/tx/${tx.hash}`);
+
+    // Wait for confirmation with timeout
+    const receipt = await Promise.race([
+      tx.wait(1),
+      new Promise<null>((_, reject) => setTimeout(() => reject(new Error('Timeout after 60s')), 60000)),
+    ]);
+
+    if (!receipt || receipt.status !== 1) {
+      return {
+        success: false,
+        txHash: tx.hash,
+        error: receipt ? 'Transaction reverted on-chain' : 'Transaction timeout',
+        retryable: !receipt, // Timeout is retryable
+        errorCode: receipt ? 'TX_REVERTED' : 'TIMEOUT',
+      };
+    }
+
+    const events = parsePayoutRedemptionEvents(receipt);
+    let totalPayout = position.currentValue || 0;
+
+    if (events.length > 0) {
+      totalPayout = events.reduce((sum: number, e: PayoutRedemptionEvent) => sum + e.payoutUSDC, 0);
+    }
+
+    console.log(`   ✅ CONFIRMED: claimed $${totalPayout.toFixed(2)}`);
+
+    confirmedClaims.set(conditionId, {
+      txHash: tx.hash,
+      blockNumber: receipt.blockNumber,
+      payoutUSDC: totalPayout,
+      confirmedAt: Date.now(),
+    });
+
+    return {
+      success: true,
+      txHash: tx.hash,
+      blockNumber: receipt.blockNumber,
+      gasUsed: receipt.gasUsed?.toNumber(),
+      gasPriceGwei: parseFloat(ethers.utils.formatUnits(receipt.effectiveGasPrice || 0, 'gwei')),
+      usdcReceived: totalPayout,
+    };
+
+  } catch (error: any) {
+    const classified = classifyClaimError(error);
+    console.error(`   ❌ Direct CTF redeem failed: ${classified.message}`);
+    return {
+      success: false,
+      error: classified.message,
+      retryable: classified.retryable,
+      errorCode: classified.code,
+    };
+  }
+}
+
 async function redeemViaMagicProxy(position: RedeemablePosition): Promise<ClaimResult> {
   const conditionId = position.conditionId;
   const collateralToken = config.polymarket.usdcAddress;
@@ -752,22 +891,49 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
   console.log(`   📍 Signer wallet: ${signerWallet.slice(0, 10)}...`);
   console.log(`   📍 Config proxy: ${configProxy.slice(0, 10) || 'not set'}...`);
 
-  // Check if the signer can claim this position
-  // Important: The position wallet must match either signer or config proxy
-  if (positionWallet !== signerWallet && positionWallet !== configProxy) {
-    console.log(`   ⚠️ Position wallet doesn't match signer or config proxy`);
-    console.log(`   💡 Make sure POLYMARKET_ADDRESS is set to: ${positionWallet}`);
+  // =========================================================================
+  // V35.13.0: Use same approach as working test-direct-redeem-v2.ts
+  // Fetch proxy from API, if none or proxy === signer, use direct CTF redemption
+  // =========================================================================
+  console.log(`   🔍 Fetching proxy address from Polymarket API...`);
+  const apiProxyAddress = await fetchProxyAddressFromAPI(signerWallet);
+  console.log(`   📍 API returned proxy: ${apiProxyAddress || 'none'}`);
+  
+  // If no proxy from API, or API proxy equals signer, use DIRECT CTF redemption
+  // This is the approach that works in test-direct-redeem-v2.ts
+  const useDirectCTF = !apiProxyAddress || apiProxyAddress.toLowerCase() === signerWallet.toLowerCase();
+  
+  if (useDirectCTF) {
+    console.log(`   🎯 Using DIRECT CTF redemption mode (no proxy or signer is proxy)`);
+    return redeemDirectCTF(position);
+  }
+  
+  console.log(`   🔐 Signer has proxy wallet at: ${apiProxyAddress}`);
+  
+  // If position is not held by signer or API proxy, we can't claim it
+  if (positionWallet !== signerWallet && positionWallet !== apiProxyAddress.toLowerCase() && positionWallet !== configProxy) {
+    console.log(`   ⚠️ Position wallet doesn't match signer or proxy`);
     return {
       success: false,
-      error: `Position belongs to ${positionWallet}, but signer is ${signerWallet} and proxy is ${configProxy || 'not set'}`,
+      error: `Position belongs to ${positionWallet}, but signer is ${signerWallet} and API proxy is ${apiProxyAddress}`,
+      retryable: false,
+      errorCode: 'WALLET_MISMATCH',
     };
   }
-
-  // Check wallet type - for Magic/Email (POLY_PROXY with signatureType=1), use direct proxy execute
-  const proxyKind = await detectProxyWalletKind(configProxy || signerWallet, provider);
+  
+  // Try proxy execute for Magic/Email wallets
+  const proxyKind = await detectProxyWalletKind(apiProxyAddress, provider);
   if (proxyKind === 'POLY_PROXY') {
-    console.log(`   🔄 Detected Magic wallet - using direct proxy execute()`);
-    return redeemViaMagicProxy(position);
+    console.log(`   🔄 Detected Magic wallet - trying proxy.execute()`);
+    const proxyResult = await redeemViaMagicProxy(position);
+    
+    // If proxy fails with NOT_OWNER, fall back to direct CTF
+    if (!proxyResult.success && proxyResult.errorCode === 'NOT_OWNER') {
+      console.log(`   ⚠️ Proxy execute failed (not owner), falling back to direct CTF...`);
+      return redeemDirectCTF(position);
+    }
+    
+    return proxyResult;
   }
 
   // V35.12.2 FIX: ALWAYS claim via proxy if configProxy is set and differs from signer
