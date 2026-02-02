@@ -258,8 +258,8 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
                 strokeDasharray="5 5"
                 strokeWidth={2}
                 label={{ 
-                  value: 'Price to Beat', 
-                  position: 'right', 
+                  value: `Price to Beat: $${strikePrice.toLocaleString()}`, 
+                  position: 'insideBottomLeft', 
                   fontSize: 10,
                   fill: 'hsl(var(--warning))'
                 }}
