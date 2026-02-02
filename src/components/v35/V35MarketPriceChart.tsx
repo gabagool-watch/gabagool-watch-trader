@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/integrations/supabase/client';
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, CartesianGrid, Legend } from 'recharts';
 import { Skeleton } from '@/components/ui/skeleton';
 import { AlertCircle, TrendingUp, TrendingDown, Activity } from 'lucide-react';
@@ -40,18 +40,9 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
   const priceToBeat = targetCpp / 2;
   const [liveData, setLiveData] = useState<PriceTick[]>([]);
   
-  // Synchronized tooltip state for both charts
-  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  // Unique syncId for synchronized tooltip/crosshair across charts in this component
+  const syncId = useMemo(() => `v35-chart-${marketSlug}`, [marketSlug]);
   
-  const handleMouseMove = useCallback((state: any) => {
-    if (state?.activeTooltipIndex !== undefined) {
-      setActiveIndex(state.activeTooltipIndex);
-    }
-  }, []);
-  
-  const handleMouseLeave = useCallback(() => {
-    setActiveIndex(null);
-  }, []);
   // Fetch historical ticks from database
   const { data: historicalTicks, isLoading, error } = useQuery<PriceTick[]>({
     queryKey: ['v35-price-ticks', marketSlug],
@@ -242,8 +233,7 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
           <LineChart 
             data={chartData} 
             margin={{ top: 5, right: 10, left: 0, bottom: 0 }}
-            onMouseMove={handleMouseMove}
-            onMouseLeave={handleMouseLeave}
+            syncId={syncId}
           >
             <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
             <XAxis 
@@ -262,7 +252,6 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
               width={70}
             />
             <Tooltip 
-              active={activeIndex !== null}
               contentStyle={{ 
                 backgroundColor: 'hsl(var(--card))', 
                 border: '1px solid hsl(var(--border))',
@@ -314,8 +303,7 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
               <LineChart 
                 data={chartData} 
                 margin={{ top: 5, right: 10, left: 0, bottom: 0 }}
-                onMouseMove={handleMouseMove}
-                onMouseLeave={handleMouseLeave}
+                syncId={syncId}
               >
                 <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.3} />
                 <XAxis 
@@ -334,7 +322,6 @@ export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetC
                   width={35}
                 />
                 <Tooltip 
-                  active={activeIndex !== null}
                   contentStyle={{ 
                     backgroundColor: 'hsl(var(--card))', 
                     border: '1px solid hsl(var(--border))',
