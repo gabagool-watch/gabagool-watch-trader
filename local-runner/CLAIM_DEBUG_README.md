@@ -122,33 +122,39 @@ claim_usdc NUMERIC
 
 ## Proxy Wallet Mode
 
-### V35.11.0 Update: Proxy Wallet Claiming via execute()
+### V35.12.0 Update: ProxyWalletFactory Claiming
 
-Previous versions incorrectly called `redeemPositions` directly from the signer wallet, but the conditional tokens are held by the **proxy wallet**. This has been fixed:
+Previous versions incorrectly tried to call `proxy.execute()` directly on the proxy wallet, but Polymarket proxy wallets (Magic/Email logins) use a different architecture - they require the **ProxyWalletFactory** contract.
 
 **How it works:**
-- The redeemer now detects when positions are held by the proxy wallet (not the signer)
-- For proxy positions, it calls `proxy.execute(CTF_ADDRESS, redeemPositions(...))` 
-- This makes the proxy wallet the `msg.sender` to the CTF contract, so it can redeem its own tokens
-- The signer wallet pays gas but the tokens move from proxy → USDC in proxy
+- Polymarket Magic/Email accounts use a ProxyWalletFactory pattern
+- The factory deployed your proxy wallet and is the only contract that can execute transactions on its behalf
+- For proxy positions, we now call `ProxyWalletFactory.proxy([{to: CTF, data: redeemPositions(...)}])`
+- The factory forwards the call to the proxy wallet, which then interacts with the CTF contract
 
 **Wallet architecture (Magic/Email accounts):**
 ```
-Signer (EOA) ─────► Proxy Wallet ─────► CTF Contract
-   │                    │                    │
-   │ pays gas           │ holds tokens       │ redeems
-   └────────────────────┴────────────────────┘
+Signer (EOA) ─────► ProxyWalletFactory ─────► Proxy Wallet ─────► CTF Contract
+    │                      │                       │                    │
+    │ pays gas             │ routes call           │ holds tokens       │ redeems
+    └──────────────────────┴───────────────────────┴────────────────────┘
 ```
+
+**For Browser wallets (MetaMask, etc.):**
+- These use Gnosis Safe architecture
+- We call `safe.execTransaction(...)` directly on the Safe contract
+- The signer must be an owner of the Safe
 
 **If claims still fail:**
 1. Verify `POLYMARKET_ADDRESS` matches your proxy wallet address (visible in Polymarket UI)
-2. Ensure the signer wallet has MATIC for gas (~0.02 MATIC per claim)
-3. Check that the signer is authorized on the proxy wallet (should be automatic for Magic exports)
-4. Run `npm run claim:debug` to diagnose issues
+2. Ensure the signer wallet has MATIC for gas (~0.05 MATIC per claim)
+3. Check that the signer is the owner of the proxy (should be automatic for Magic exports)
+4. Set `POLYMARKET_SIGNATURE_TYPE=1` for Magic/Email or `=2` for Safe/Browser wallets
+5. Run `npm run claim:debug` to diagnose issues
 
 **Manual claiming (fallback):**
 1. Go to https://polymarket.com/portfolio
-2. Connect your MetaMask wallet
+2. Connect your wallet (same one used to trade)
 3. Click "Claim" on each resolved market
 
 ## Troubleshooting

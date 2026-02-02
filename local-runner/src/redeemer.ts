@@ -46,12 +46,13 @@ const CTF_REDEEM_ABI = [
   'function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] calldata indexSets) external',
 ];
 
-// Proxy wallet ABIs
-// Polymarket wallets can be either:
-//  - a simple proxy with execute(target, data)
-//  - a Gnosis Safe (common for smart-wallet setups)
-const PROXY_WALLET_EXECUTE_ABI = [
-  'function execute(address target, bytes calldata data) external returns (bytes memory)',
+// ProxyWalletFactory address on Polygon (used by Magic/Email logins)
+// This is the contract that deployed proxy wallets and can execute transactions on their behalf
+const PROXY_WALLET_FACTORY_ADDRESS = '0xaB45c5A4B0c941a2F231C04C3f49182e1A254052';
+
+// ProxyWalletFactory ABI - the proxy() method executes transactions on behalf of the proxy wallet
+const PROXY_WALLET_FACTORY_ABI = [
+  'function proxy(tuple(address to, uint8 typeCode, bytes data, uint256 value)[] calls) external',
 ];
 
 const GNOSIS_SAFE_ABI = [
@@ -61,24 +62,24 @@ const GNOSIS_SAFE_ABI = [
   'function execTransaction(address to,uint256 value,bytes data,uint8 operation,uint256 safeTxGas,uint256 baseGas,uint256 gasPrice,address gasToken,address refundReceiver,bytes signatures) payable returns (bool success)',
 ];
 
-type ProxyWalletKind = 'EXECUTE' | 'GNOSIS_SAFE';
+type ProxyWalletKind = 'POLY_PROXY' | 'GNOSIS_SAFE';
 
 async function detectProxyWalletKind(proxyAddress: string, provider: any): Promise<ProxyWalletKind> {
   // Allow explicit override via env
-  // 0 = EOA, 1 = POLY_PROXY (execute), 2 = GNOSIS_SAFE
+  // 0 = EOA, 1 = POLY_PROXY (Magic/Email), 2 = GNOSIS_SAFE (Browser wallet)
   if (config.polymarket.signatureType === 2) return 'GNOSIS_SAFE';
-  if (config.polymarket.signatureType === 1) return 'EXECUTE';
+  if (config.polymarket.signatureType === 1) return 'POLY_PROXY';
 
-  // Auto-detect: if getOwners() works, it's almost certainly a Safe.
+  // Auto-detect: if getOwners() works, it's almost certainly a Safe (browser wallet like MetaMask).
   try {
     const safe = new ethers.Contract(proxyAddress, ['function getOwners() view returns (address[])'], provider);
     const owners = await safe.getOwners();
     if (Array.isArray(owners) && owners.length >= 1) return 'GNOSIS_SAFE';
   } catch {
-    // fallthrough
+    // fallthrough - not a Safe, so it's a Polymarket Proxy (Magic/Email)
   }
 
-  return 'EXECUTE';
+  return 'POLY_PROXY';
 }
 
 // ============================================================================
@@ -522,9 +523,9 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
     const gasPriceGwei = parseFloat(ethers.utils.formatUnits(maxPriority, 'gwei'));
 
     // Conservative default gas limit; avoid relying on estimateGas (which can revert on proxy wallets).
-    const conservativeGasLimit = ethers.BigNumber.from(350_000); // proxy.execute path
-    const conservativeSafeGasLimit = ethers.BigNumber.from(900_000); // Safe execTransaction path
-    const worstCaseCostWei = conservativeGasLimit.mul(maxFee);
+    const conservativeGasLimit = ethers.BigNumber.from(500_000); // ProxyWalletFactory.proxy() path
+    const conservativeSafeGasLimit = ethers.BigNumber.from(1_000_000); // Safe execTransaction path
+    const worstCaseCostWei = conservativeSafeGasLimit.mul(maxFee); // Use highest gas limit for balance check
 
     if (balanceWei.lt(worstCaseCostWei)) {
       const msg = buildInsufficientFundsMessage(signer);
@@ -606,12 +607,26 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
           }
         );
       } else {
-        console.log(`   🔐 Detected proxy wallet type: EXECUTE`);
-        console.log(`   📤 Calling proxy.execute(CTF, redeemPositions(...))`);
+        // POLY_PROXY: Polymarket Proxy Wallet (Magic/Email login)
+        // The tokens are held by the proxy wallet, but we claim via the ProxyWalletFactory
+        // The factory's proxy() method executes transactions on behalf of the proxy wallet
+        console.log(`   🔐 Detected proxy wallet type: POLY_PROXY (Magic/Email)`);
+        console.log(`   📤 Calling ProxyWalletFactory.proxy([{to: CTF, data: redeemPositions(...)}])`);
 
-        const proxyContract = new ethers.Contract(claimFromWallet, PROXY_WALLET_EXECUTE_ABI, wallet!);
+        const factory = new ethers.Contract(PROXY_WALLET_FACTORY_ADDRESS, PROXY_WALLET_FACTORY_ABI, wallet!);
 
-        tx = await proxyContract.execute(CTF_ADDRESS, redeemCalldata, {
+        // The factory.proxy() method takes an array of calls to execute
+        // typeCode: 1 = CALL (vs 0 = DELEGATE_CALL)
+        const calls = [
+          {
+            to: CTF_ADDRESS,
+            typeCode: 1, // CALL
+            data: redeemCalldata,
+            value: 0,
+          }
+        ];
+
+        tx = await factory.proxy(calls, {
           maxFeePerGas: maxFee,
           maxPriorityFeePerGas: maxPriority,
           gasLimit: conservativeGasLimit,
