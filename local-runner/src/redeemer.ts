@@ -40,7 +40,7 @@ import { reconcile, printReconciliationReport } from './reconcile.js';
 // ============================================================================
 
 const DATA_API_URL = 'https://data-api.polymarket.com';
-const RELAYER_URL = 'https://relayer.polymarket.com'; // Polymarket Relayer endpoint
+const CLOB_API_URL = 'https://clob.polymarket.com'; // Use CLOB API (relayer.polymarket.com doesn't exist)
 const DEFAULT_CLAIM_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MIN_CLAIM_THRESHOLD_USD = 0.10; // Minimum $0.10 to claim (gas efficiency)
 const MAX_RETRY_COUNT = 3;
@@ -565,9 +565,9 @@ async function redeemViaRelayer(position: RedeemablePosition): Promise<ClaimResu
       bodyStr
     );
 
-    console.log(`   📡 Sending redemption request to Relayer...`);
+    console.log(`   📡 Sending redemption request to CLOB API...`);
 
-    const response = await fetch(`${RELAYER_URL}${requestPath}`, {
+    const response = await fetch(`${CLOB_API_URL}${requestPath}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
