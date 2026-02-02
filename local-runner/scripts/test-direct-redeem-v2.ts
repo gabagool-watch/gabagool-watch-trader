@@ -113,10 +113,17 @@ async function main() {
   ]);
   console.log(`   ✅ Calldata built`);
 
-  // Gas settings (like the working script)
+  // Gas settings - use high minimums for Polygon
   const feeData = await provider.getFeeData();
-  const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas.mul(130).div(100);
-  const maxFeePerGas = feeData.maxFeePerGas.mul(130).div(100);
+  // Polygon requires minimum 25-30 gwei priority fee
+  const minPriority = ethers.utils.parseUnits('30', 'gwei');
+  const minMaxFee = ethers.utils.parseUnits('100', 'gwei');
+  const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas?.gt(minPriority) 
+    ? feeData.maxPriorityFeePerGas.mul(130).div(100) 
+    : minPriority;
+  const maxFeePerGas = feeData.maxFeePerGas?.gt(minMaxFee)
+    ? feeData.maxFeePerGas.mul(130).div(100)
+    : minMaxFee;
   console.log(`\n⛽ Gas settings:`);
   console.log(`   Priority: ${ethers.utils.formatUnits(maxPriorityFeePerGas, 'gwei')} gwei`);
   console.log(`   Max fee: ${ethers.utils.formatUnits(maxFeePerGas, 'gwei')} gwei`);
