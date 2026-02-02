@@ -885,6 +885,7 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
   const positionWallet = (position.proxyWallet || '').toLowerCase();
   const signerWallet = (wallet?.address || '').toLowerCase();
   const configProxy = (config.polymarket.address || '').toLowerCase();
+  const hasConfigProxyWallet = configProxy.length > 0 && configProxy !== signerWallet;
   
   console.log(`   🔧 Claiming position (on-chain)...`);
   console.log(`   📍 Position held by: ${positionWallet.slice(0, 10)}...`);
@@ -898,31 +899,48 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
   console.log(`   🔍 Fetching proxy address from Polymarket API...`);
   const apiProxyAddress = await fetchProxyAddressFromAPI(signerWallet);
   console.log(`   📍 API returned proxy: ${apiProxyAddress || 'none'}`);
+
+  // If a proxy wallet is explicitly configured (POLYMARKET_ADDRESS != signer), we must NOT
+  // short-circuit into direct-CTF mode just because the profile API doesn't return a proxy.
+  // In that situation, direct CTF redemption would redeem from the signer wallet (often $0 payout)
+  // while the position is actually held by the configured proxy wallet.
+  const effectiveProxyAddress = apiProxyAddress || (hasConfigProxyWallet ? ethers.utils.getAddress(configProxy) : null);
+  const effectiveProxyLower = (effectiveProxyAddress || '').toLowerCase();
   
   // If no proxy from API, or API proxy equals signer, use DIRECT CTF redemption
-  // This is the approach that works in test-direct-redeem-v2.ts
-  const useDirectCTF = !apiProxyAddress || apiProxyAddress.toLowerCase() === signerWallet.toLowerCase();
+  // (but only if we DON'T have an explicit configured proxy wallet).
+  // This mirrors test-direct-redeem-v2.ts for true EOA flows.
+  const useDirectCTF = (!apiProxyAddress || apiProxyAddress.toLowerCase() === signerWallet.toLowerCase()) && !hasConfigProxyWallet;
   
   if (useDirectCTF) {
     console.log(`   🎯 Using DIRECT CTF redemption mode (no proxy or signer is proxy)`);
     return redeemDirectCTF(position);
   }
-  
-  console.log(`   🔐 Signer has proxy wallet at: ${apiProxyAddress}`);
+
+  if (!effectiveProxyAddress) {
+    return {
+      success: false,
+      error: `No proxy detected for signer and no POLYMARKET_ADDRESS configured; cannot determine token holder wallet for redemption.`,
+      retryable: false,
+      errorCode: 'NO_PROXY',
+    };
+  }
+
+  console.log(`   🔐 Using proxy wallet: ${effectiveProxyAddress}`);
   
   // If position is not held by signer or API proxy, we can't claim it
-  if (positionWallet !== signerWallet && positionWallet !== apiProxyAddress.toLowerCase() && positionWallet !== configProxy) {
+  if (positionWallet !== signerWallet && positionWallet !== effectiveProxyLower && positionWallet !== configProxy) {
     console.log(`   ⚠️ Position wallet doesn't match signer or proxy`);
     return {
       success: false,
-      error: `Position belongs to ${positionWallet}, but signer is ${signerWallet} and API proxy is ${apiProxyAddress}`,
+      error: `Position belongs to ${positionWallet}, but signer is ${signerWallet} and proxy is ${effectiveProxyLower}`,
       retryable: false,
       errorCode: 'WALLET_MISMATCH',
     };
   }
   
   // Try proxy execute for Magic/Email wallets
-  const proxyKind = await detectProxyWalletKind(apiProxyAddress, provider);
+  const proxyKind = await detectProxyWalletKind(effectiveProxyAddress, provider);
   if (proxyKind === 'POLY_PROXY') {
     console.log(`   🔄 Detected Magic wallet - trying proxy.execute()`);
     const proxyResult = await redeemViaMagicProxy(position);
