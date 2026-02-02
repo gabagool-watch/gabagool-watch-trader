@@ -11,12 +11,14 @@
 
 import { config } from '../src/config.js';
 import crypto from 'node:crypto';
+import pkg from 'ethers';
+const { Wallet } = pkg as any;
 
 const CLOB_API_URL = 'https://clob.polymarket.com';
 
 function toUrlSafeBase64(b64: string): string {
-  // Polymarket expects base64url WITHOUT padding
-  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  // Match the runner's implementation: url-safe base64, KEEP padding
+  return b64.replace(/\+/g, '-').replace(/\//g, '_');
 }
 
 function sanitizeBase64Secret(secret: string): string {
@@ -33,13 +35,13 @@ function sanitizeBase64Secret(secret: string): string {
 
 function buildRelayerSignature(
   secretBytes: Buffer,
-  timestampMs: string,
+  timestampSeconds: string,
   method: string,
   requestPath: string,
   body: string = '',
   signatureVariant: 'base64url' | 'base64' = 'base64url'
 ): string {
-  const message = `${timestampMs}${method.toUpperCase()}${requestPath}${body}`;
+  const message = `${timestampSeconds}${method.toUpperCase()}${requestPath}${body}`;
   const digest = crypto.createHmac('sha256', secretBytes).update(message).digest();
   const b64 = Buffer.from(digest).toString('base64');
   return signatureVariant === 'base64url' ? toUrlSafeBase64(b64) : b64;
@@ -74,7 +76,15 @@ async function main() {
   const regularApiKey = config.polymarket.apiKey;
   const regularApiSecret = config.polymarket.apiSecret;
   const regularPassphrase = config.polymarket.passphrase;
-  const address = config.polymarket.address;
+  const funderAddress = config.polymarket.address;
+  const signerAddress = (() => {
+    try {
+      const w = new Wallet(config.polymarket.privateKey);
+      return String(w.address);
+    } catch {
+      return null;
+    }
+  })();
   
   // Builder credentials (for comparison)
   const builderApiKey = config.polymarket.builderApiKey;
@@ -85,14 +95,15 @@ async function main() {
   console.log(`   POLYMARKET_API_KEY: ${regularApiKey ? `✅ set (${regularApiKey.length} chars, starts with "${regularApiKey.slice(0, 8)}...")` : '❌ MISSING'}`);
   console.log(`   POLYMARKET_API_SECRET: ${regularApiSecret ? `✅ set (${regularApiSecret.length} chars)` : '❌ MISSING'}`);
   console.log(`   POLYMARKET_PASSPHRASE: ${regularPassphrase ? `✅ set (${regularPassphrase.length} chars)` : '❌ MISSING'}`);
-  console.log(`   POLYMARKET_ADDRESS: ${address ? `✅ set (${address.slice(0, 10)}...)` : '❌ MISSING'}`);
+  console.log(`   POLYMARKET_ADDRESS (funder): ${funderAddress ? `✅ set (${funderAddress.slice(0, 10)}...)` : '❌ MISSING'}`);
+  console.log(`   Signer (from private key): ${signerAddress ? `✅ ${signerAddress.slice(0, 10)}...` : '⚠️ unavailable'}`);
 
   console.log('\n   Builder credentials (for reference):');
   console.log(`   POLY_BUILDER_API_KEY: ${builderApiKey ? `✅ set (${builderApiKey.length} chars)` : '⚠️ not set'}`);
   console.log(`   POLY_BUILDER_API_SECRET: ${builderApiSecret ? `✅ set (${builderApiSecret.length} chars)` : '⚠️ not set'}`);
   console.log(`   POLY_BUILDER_PASSPHRASE: ${builderPassphrase ? `✅ set (${builderPassphrase.length} chars)` : '⚠️ not set'}`);
 
-  if (!regularApiKey || !regularApiSecret || !regularPassphrase || !address) {
+  if (!regularApiKey || !regularApiSecret || !regularPassphrase || !funderAddress) {
     console.error('\n❌ Missing regular CLOB API credentials!');
     process.exit(1);
   }
@@ -109,7 +120,7 @@ async function main() {
     console.log(`   Sanitized secret length: ${sanitizedSecret.length} chars`);
     console.log(`   Secret bytes length: ${secretBytes.length} bytes`);
 
-    const testTimestamp = Date.now().toString();
+    const testTimestamp = Math.floor(Date.now() / 1000).toString();
     const testSignature = buildRelayerSignature(secretBytes, testTimestamp, 'GET', '/health', '', 'base64url');
     console.log(`   Test signature: ${testSignature.slice(0, 20)}...`);
     console.log('   ✅ Signature generation works!');
@@ -145,7 +156,7 @@ async function main() {
   // Step 4: Test authenticated endpoint with REGULAR credentials
   console.log('\n📋 STEP 4: Testing authenticated CLOB API call (regular credentials)...');
 
-  const endpointsToTry = ['/auth/api-keys', '/auth/me', '/account'];
+  const endpointsToTry = ['/auth/api-keys'];
   const secretVariants: Array<{ label: 'base64url' | 'base64'; bytes: Buffer }> = [
     { label: 'base64url', bytes: decodeSecret(regularApiSecret, 'base64url')! },
     { label: 'base64', bytes: decodeSecret(regularApiSecret, 'base64')! },
@@ -161,7 +172,7 @@ async function main() {
       for (const signatureVariant of signatureVariants) {
         try {
           // IMPORTANT: Polymarket uses MILLISECONDS, not seconds!
-          const timestamp = Date.now().toString();
+          const timestamp = Math.floor(Date.now() / 1000).toString();
           const method = 'GET';
 
           const signature = buildRelayerSignature(
@@ -176,7 +187,8 @@ async function main() {
           const headers: Record<string, string> = {
             Accept: 'application/json',
             'Content-Type': 'application/json',
-            POLY_ADDRESS: address,
+            // Match runner behavior: POLY_ADDRESS should be the SIGNER address
+            POLY_ADDRESS: signerAddress ?? funderAddress,
             POLY_API_KEY: regularApiKey,
             POLY_PASSPHRASE: regularPassphrase,
             POLY_SIGNATURE: signature,
