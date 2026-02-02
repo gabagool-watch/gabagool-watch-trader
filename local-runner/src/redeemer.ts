@@ -590,15 +590,9 @@ async function redeemViaMagicProxy(position: RedeemablePosition): Promise<ClaimR
         errorCode: 'GNOSIS_SAFE',
       };
     }
-    if (!ownerInfo.ownerAddress) {
-      return {
-        success: false,
-        error: `Could not determine proxy owner; refusing to execute (would likely revert).`,
-        retryable: false,
-        errorCode: 'OWNER_UNKNOWN',
-      };
-    }
-    if (!ownerInfo.isOwnedBy(wallet.address)) {
+    // If we *can* determine owner and it's not the signer, this is a hard fail.
+    // If we *cannot* determine owner (unknown proxy pattern), we continue with a no-gas preflight below.
+    if (ownerInfo.ownerAddress && !ownerInfo.isOwnedBy(wallet.address)) {
       return {
         success: false,
         error: `Signer is not proxy owner (owner=${ownerInfo.ownerAddress}). Check POLYMARKET_PRIVATE_KEY / POLYMARKET_ADDRESS pairing.`,
@@ -606,15 +600,43 @@ async function redeemViaMagicProxy(position: RedeemablePosition): Promise<ClaimR
         errorCode: 'NOT_OWNER',
       };
     }
-    console.log(`   ✅ Signer is proxy wallet owner`);
+    if (ownerInfo.ownerAddress) {
+      console.log(`   ✅ Signer is proxy wallet owner`);
+    } else {
+      console.log(`   ⚠️ Proxy owner unknown (custom proxy). Continuing with preflight authorization checks...`);
+    }
 
-    // Preflight: if this reverts, sending will also revert (saves gas)
+    // Preflight (no gas):
+    // 1) Simulate redeemPositions as-if it was called by the proxy (from=proxyWallet)
+    //    If this fails, it's very likely a non-redeemable condition (not resolved / already redeemed / wrong conditionId).
+    let ctfCallWouldSucceed = false;
+    try {
+      await provider.call({
+        to: CTF_ADDRESS,
+        from: proxyWallet,
+        data: redeemCalldata,
+      });
+      ctfCallWouldSucceed = true;
+    } catch {
+      ctfCallWouldSucceed = false;
+    }
+
+    // 2) Simulate proxy.execute() from signer.
+    //    If CTF call would succeed but proxy.execute fails, it's an authorization / proxy-logic issue (wrong key).
     try {
       await proxyContract.callStatic.execute(CTF_ADDRESS, redeemCalldata);
     } catch {
+      if (ctfCallWouldSucceed) {
+        return {
+          success: false,
+          error: `proxy_execute_reverted_but_ctf_call_ok: signer likely not authorized to execute on this proxy (check POLYMARKET_PRIVATE_KEY matches this proxy wallet).`,
+          retryable: false,
+          errorCode: 'NOT_OWNER',
+        };
+      }
       return {
         success: false,
-        error: `proxy_execute_would_revert: position likely not redeemable yet, already redeemed, wrong conditionId, or wrong collateral token`,
+        error: `ctf_redeem_would_revert: position likely not redeemable yet, already redeemed, wrong conditionId, or wrong collateral token`,
         retryable: true,
         errorCode: 'EXEC_REVERT',
       };

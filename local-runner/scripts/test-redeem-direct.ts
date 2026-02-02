@@ -81,19 +81,21 @@ async function main() {
     process.exit(1);
   }
 
-  if (!ownerInfo.ownerAddress) {
-    console.error(`\n❌ Could not determine proxy owner; refusing to proceed (execute would likely revert).`);
-    process.exit(1);
-  }
-
-  if (!ownerInfo.isOwnedBy(wallet.address)) {
+  // If we can determine the owner and it's not the signer, that's a hard fail.
+  // If owner is unknown (custom proxy pattern), we'll rely on no-gas preflight checks below.
+  if (ownerInfo.ownerAddress && !ownerInfo.isOwnedBy(wallet.address)) {
     console.error(`\n❌ Signer is NOT the proxy wallet owner!`);
     console.error(`   Signer: ${wallet.address}`);
     console.error(`   Owner:  ${ownerInfo.ownerAddress}`);
     console.error(`\n💡 Fix: set POLYMARKET_PRIVATE_KEY to the private key that owns POLYMARKET_ADDRESS.`);
     process.exit(1);
   }
-  console.log(`   ✅ Signer is the owner`);
+
+  if (ownerInfo.ownerAddress) {
+    console.log(`   ✅ Signer is the owner`);
+  } else {
+    console.log(`   ⚠️ Owner unknown for this proxy (custom pattern). Continuing with preflight checks...`);
+  }
 
   // Build redemption calldata
   console.log(`\n📦 Building redemption transaction...`);
@@ -136,6 +138,35 @@ async function main() {
 
   // DRY RUN - estimate gas first
   console.log(`\n🔍 Estimating gas (dry run)...`);
+  // Preflight checks (no gas):
+  // 1) Simulate redeemPositions from the proxy itself (from=proxyWallet)
+  // 2) Simulate proxy.execute from signer
+  console.log(`\n🧪 Preflight checks (no gas)...`);
+  let ctfCallWouldSucceed = false;
+  try {
+    await provider.call({
+      to: CTF_ADDRESS,
+      from: proxyWallet,
+      data: redeemCalldata,
+    });
+    ctfCallWouldSucceed = true;
+    console.log(`   ✅ CTF redeemPositions would succeed when called by proxy`);
+  } catch {
+    ctfCallWouldSucceed = false;
+    console.log(`   ❌ CTF redeemPositions would revert (likely not redeemable / already redeemed / wrong conditionId)`);
+  }
+
+  try {
+    await proxyContract.callStatic.execute(CTF_ADDRESS, redeemCalldata);
+    console.log(`   ✅ proxy.execute is authorized for this signer`);
+  } catch {
+    if (ctfCallWouldSucceed) {
+      console.error(`   ❌ proxy.execute would revert BUT CTF call is OK → signer likely not authorized for this proxy`);
+      process.exit(1);
+    }
+    // If CTF itself would revert, execute will also revert; keep going to gas estimate for the full error message.
+  }
+
   try {
     const gasEstimate = await proxyContract.estimateGas.execute(CTF_ADDRESS, redeemCalldata);
     console.log(`   ✅ Gas estimate: ${gasEstimate.toString()}`);
