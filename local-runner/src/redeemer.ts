@@ -40,7 +40,7 @@ import { reconcile, printReconciliationReport } from './reconcile.js';
 // ============================================================================
 
 const DATA_API_URL = 'https://data-api.polymarket.com';
-const CLOB_API_URL = 'https://clob.polymarket.com'; // Use CLOB API (relayer.polymarket.com doesn't exist)
+const RELAYER_API_URL = 'https://relayer.polymarket.com'; // Official Relayer API for gasless transactions
 const DEFAULT_CLAIM_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MIN_CLAIM_THRESHOLD_USD = 0.10; // Minimum $0.10 to claim (gas efficiency)
 const MAX_RETRY_COUNT = 3;
@@ -514,6 +514,7 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
 
 // ============================================================================
 // REDEEM: Relayer API method (for Magic/Email wallets - gasless)
+// Uses the official Polymarket Relayer API /execute endpoint
 // ============================================================================
 
 async function redeemViaRelayer(position: RedeemablePosition): Promise<ClaimResult> {
@@ -524,6 +525,7 @@ async function redeemViaRelayer(position: RedeemablePosition): Promise<ClaimResu
   console.log(`   🌐 Using Relayer API (gasless) for Magic wallet`);
   console.log(`   📍 Proxy wallet: ${proxyWallet}`);
   console.log(`   📍 Condition ID: ${conditionId}`);
+  console.log(`   📍 Collateral: ${collateralToken}`);
 
   if (!hasBuilderCredentials()) {
     console.log(`   ❌ Builder API credentials not configured!`);
@@ -537,22 +539,36 @@ async function redeemViaRelayer(position: RedeemablePosition): Promise<ClaimResu
   }
 
   try {
+    // Build the CTF redeemPositions calldata
     const indexSets = [1, 2]; // YES and NO outcome indices
     const parentCollectionId = ethers.utils.hexZeroPad('0x00', 32);
 
-    // Build the redemption request payload
-    const requestPath = '/redeem';
+    const ctfInterface = new ethers.utils.Interface(CTF_REDEEM_ABI);
+    const redeemCalldata = ctfInterface.encodeFunctionData('redeemPositions', [
+      collateralToken,
+      parentCollectionId,
+      conditionId,
+      indexSets,
+    ]);
+
+    // Build the transaction object for the relayer
+    const redeemTx = {
+      to: CTF_ADDRESS,
+      data: redeemCalldata,
+      value: '0',
+    };
+
+    // Relayer API uses /execute endpoint with array of transactions
+    const requestPath = '/execute';
     const payload = {
-      collateralToken: collateralToken,
-      conditionId: conditionId,
-      indexSets: indexSets,
-      parentCollectionId: parentCollectionId,
+      transactions: [redeemTx],
+      description: `Claim winnings: ${position.title?.slice(0, 50) || conditionId.slice(0, 20)}`,
     };
 
     const bodyStr = JSON.stringify(payload);
     const timestampSeconds = String(Math.floor(Date.now() / 1000));
 
-    // Sign the request
+    // Sign the request with Builder credentials
     const secretBytes = Buffer.from(
       sanitizeBase64Secret(config.polymarket.builderApiSecret),
       'base64'
@@ -565,9 +581,10 @@ async function redeemViaRelayer(position: RedeemablePosition): Promise<ClaimResu
       bodyStr
     );
 
-    console.log(`   📡 Sending redemption request to CLOB API...`);
+    console.log(`   📡 Sending redemption to Relayer API...`);
+    console.log(`   📋 Payload: ${JSON.stringify(redeemTx).slice(0, 100)}...`);
 
-    const response = await fetch(`${CLOB_API_URL}${requestPath}`, {
+    const response = await fetch(`${RELAYER_API_URL}${requestPath}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -584,7 +601,7 @@ async function redeemViaRelayer(position: RedeemablePosition): Promise<ClaimResu
     
     if (!response.ok) {
       console.log(`   ❌ Relayer returned HTTP ${response.status}`);
-      console.log(`   Response: ${responseText.slice(0, 200)}`);
+      console.log(`   Response: ${responseText.slice(0, 300)}`);
       
       // Check for specific error types
       const isRateLimit = response.status === 429;
@@ -606,19 +623,56 @@ async function redeemViaRelayer(position: RedeemablePosition): Promise<ClaimResu
     }
 
     console.log(`   ✅ Relayer accepted redemption request`);
-    console.log(`   📋 Response: ${JSON.stringify(result).slice(0, 200)}`);
+    console.log(`   📋 Response: ${JSON.stringify(result).slice(0, 300)}`);
 
-    // The relayer returns a transaction hash or task ID
-    const txHash = result?.transactionHash || result?.txHash || result?.hash || result?.taskId;
+    // The relayer returns a transaction hash when the tx is submitted
+    const txHash = result?.transactionHash || result?.txHash || result?.hash || result?.id;
 
     if (txHash) {
-      console.log(`   🔗 Transaction/Task: ${txHash}`);
+      console.log(`   🔗 Transaction: ${txHash}`);
       
-      // For relayer transactions, we may not have immediate confirmation
-      // Log as pending and let the next cycle verify
+      // Wait for confirmation if we got a tx hash
+      if (txHash.startsWith('0x') && txHash.length === 66) {
+        console.log(`   ⏳ Waiting for on-chain confirmation...`);
+        const receipt = await waitForTransaction(txHash, 1, 120000);
+        
+        if (receipt && receipt.status === 1) {
+          const events = parsePayoutRedemptionEvents(receipt);
+          let totalPayout = position.currentValue || 0;
+          
+          if (events.length > 0) {
+            totalPayout = events.reduce((sum, e) => sum + e.payoutUSDC, 0);
+            console.log(`   ✅ CONFIRMED: claimed $${totalPayout.toFixed(2)}`);
+          }
+          
+          confirmedClaims.set(conditionId, {
+            txHash: txHash,
+            blockNumber: receipt.blockNumber,
+            payoutUSDC: totalPayout,
+            confirmedAt: Date.now(),
+          });
+
+          return {
+            success: true,
+            txHash: txHash,
+            blockNumber: receipt.blockNumber,
+            gasUsed: receipt.gasUsed?.toNumber(),
+            usdcReceived: totalPayout,
+          };
+        } else if (receipt && receipt.status === 0) {
+          return {
+            success: false,
+            txHash: txHash,
+            error: 'Transaction reverted on-chain',
+            retryable: false,
+          };
+        }
+      }
+      
+      // If we can't confirm immediately, mark as pending success
       confirmedClaims.set(conditionId, {
         txHash: txHash,
-        blockNumber: 0, // Will be updated on confirmation
+        blockNumber: 0,
         payoutUSDC: position.currentValue || 0,
         confirmedAt: Date.now(),
       });
@@ -630,18 +684,29 @@ async function redeemViaRelayer(position: RedeemablePosition): Promise<ClaimResu
       };
     }
 
-    // Even without txHash, if status is success, consider it done
-    if (result?.success || result?.status === 'success' || result?.status === 'queued') {
-      console.log(`   ✅ Redemption queued successfully`);
+    // Check for queued/pending status
+    if (result?.success || result?.status === 'success' || result?.status === 'queued' || result?.status === 'pending') {
+      console.log(`   ✅ Redemption queued by relayer`);
+      
+      // Mark as claimed to prevent re-attempts
+      confirmedClaims.set(conditionId, {
+        txHash: 'relayer-queued',
+        blockNumber: 0,
+        payoutUSDC: position.currentValue || 0,
+        confirmedAt: Date.now(),
+      });
+      
       return {
         success: true,
         usdcReceived: position.currentValue || 0,
       };
     }
 
+    // Unexpected response format
+    console.log(`   ⚠️ Unexpected relayer response format`);
     return {
       success: false,
-      error: `Unexpected relayer response: ${JSON.stringify(result).slice(0, 100)}`,
+      error: `Unexpected relayer response: ${JSON.stringify(result).slice(0, 150)}`,
       retryable: true,
     };
 
