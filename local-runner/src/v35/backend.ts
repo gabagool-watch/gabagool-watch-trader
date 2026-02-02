@@ -498,18 +498,34 @@ export async function sendV35Offline(runnerId: string): Promise<void> {
 // PRICE TICK LOGGING
 // ============================================================
 
-export async function saveV35PriceTick(asset: string, price: number, ts: number): Promise<boolean> {
+export type V35PriceTickRow = {
+  market_slug: string;
+  asset: string;
+  ts: number;
+  spot_price: number;
+  up_best_bid?: number | null;
+  up_best_ask?: number | null;
+  down_best_bid?: number | null;
+  down_best_ask?: number | null;
+  strike_price?: number | null;
+  run_id?: string | null;
+};
+
+// Batch insert (preferred): one proxy call per asset tick.
+export async function saveV35PriceTicks(ticks: V35PriceTickRow[]): Promise<boolean> {
+  if (ticks.length === 0) return true;
   try {
-    const result = await callProxy<{ success: boolean }>('save-v35-price-tick', {
-      tick: {
-        asset,
-        price,
-        ts,
-      },
+    const result = await callProxy<{ success: boolean; count?: number }>('save-v35-price-tick', {
+      ticks,
     });
     return result.success;
-  } catch (err: any) {
-    // Silent fail - we log many ticks, don't spam errors
+  } catch {
+    // Silent fail - ticks are high-volume; caller should rate-limit logging if needed.
     return false;
   }
+}
+
+// Convenience wrapper
+export async function saveV35PriceTick(tick: V35PriceTickRow): Promise<boolean> {
+  return saveV35PriceTicks([tick]);
 }

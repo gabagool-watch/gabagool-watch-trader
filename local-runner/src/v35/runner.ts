@@ -62,7 +62,7 @@ import { getHedgeManager, resetHedgeManager } from './hedge-manager.js';
 import { getCircuitBreaker, initCircuitBreaker, resetCircuitBreaker } from './circuit-breaker.js';
 import { getProactiveRebalancer, resetProactiveRebalancer } from './proactive-rebalancer.js';
 import { getEmergencyRecovery, resetEmergencyRecovery, analyzeRecovery, setRecoveryConfig } from './emergency-recovery.js';
-import { sendV35Heartbeat, sendV35Offline, saveV35Settlement, saveV35Fill, saveV35OrderbookSnapshots, saveV35InventorySnapshot, saveV35ExpirySnapshot, saveV35PriceTick, type V35InventorySnapshot, type V35ExpirySnapshotData } from './backend.js';
+import { sendV35Heartbeat, sendV35Offline, saveV35Settlement, saveV35Fill, saveV35OrderbookSnapshots, saveV35InventorySnapshot, saveV35ExpirySnapshot, saveV35PriceTicks, type V35InventorySnapshot, type V35ExpirySnapshotData, type V35PriceTickRow } from './backend.js';
 import type { V35OrderbookSnapshot } from './types.js';
 // V36: Import new depth-aware modules
 import { getV36QuotingEngine, resetV36QuotingEngine } from './v36-quoting-engine.js';
@@ -1387,23 +1387,61 @@ async function main(): Promise<void> {
     }
   });
   
-  // Start Binance price feed for momentum detection
-  if (config.enableMomentumFilter) {
-    log('📊 Starting Binance price feed for momentum detection...');
-    
-    // V36.4.5: Register price tick callback to log spot prices to database
-    // This enables crossing analysis for expiry snapshots
-    setPriceTickCallback(async (asset, price, ts) => {
-      saveV35PriceTick(asset, price, ts).catch(() => {
-        // Silent fail - we log many ticks, don't spam errors
+  // =========================================================
+  // PRICE TICK LOGGING (for v35_price_ticks chart)
+  // =========================================================
+  // We log Binance spot price (throttled inside binance-feed) but persist it per-market.
+  // This is independent of the momentum filter (which only changes decisioning).
+  let lastPriceTickSaveErrorAt = 0;
+  setPriceTickCallback((asset, price, ts) => {
+    const ticks: V35PriceTickRow[] = [];
+    for (const m of markets.values()) {
+      if (m.asset !== asset) continue;
+      ticks.push({
+        market_slug: m.slug,
+        asset,
+        ts,
+        spot_price: price,
+        up_best_bid: m.upBestBid ? m.upBestBid : null,
+        up_best_ask: m.upBestAsk ? m.upBestAsk : null,
+        down_best_bid: m.downBestBid ? m.downBestBid : null,
+        down_best_ask: m.downBestAsk ? m.downBestAsk : null,
+        strike_price: null,
+        run_id: RUN_ID,
       });
-    });
-    log('📊 Price tick logging enabled (every 5s per asset)');
-    
-    startBinanceFeed();
-    // Give it a moment to connect
-    await sleep(2000);
-  }
+    }
+
+    if (ticks.length === 0) return;
+
+    saveV35PriceTicks(ticks)
+      .then((ok) => {
+        if (!ok) {
+          const now = Date.now();
+          if (now - lastPriceTickSaveErrorAt > 60_000) {
+            lastPriceTickSaveErrorAt = now;
+            logError('[PriceTicks] save failed (rate-limited)');
+          }
+        }
+      })
+      .catch(() => {
+        const now = Date.now();
+        if (now - lastPriceTickSaveErrorAt > 60_000) {
+          lastPriceTickSaveErrorAt = now;
+          logError('[PriceTicks] save threw (rate-limited)');
+        }
+      });
+  });
+  log('📊 Price tick logging enabled (Binance, every 5s per asset)');
+
+  // Start Binance price feed (used for both momentum filter + price tick logging)
+  log(
+    config.enableMomentumFilter
+      ? '📊 Starting Binance price feed (momentum filter + ticks)...'
+      : '📊 Starting Binance price feed (ticks only; momentum filter disabled)...'
+  );
+  startBinanceFeed();
+  // Give it a moment to connect
+  await sleep(2000);
   
   // =========================================================================
   // V35.1.2: CRITICAL STARTUP SEQUENCE
