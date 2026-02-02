@@ -122,22 +122,20 @@ claim_usdc NUMERIC
 
 ## Proxy Wallet Mode
 
-### V35.12.1 Update: Direct Proxy Wallet Claiming
+### V35.12.2 Update: Fixed Proxy Wallet Claiming
 
-Previous versions incorrectly tried to use `ProxyWalletFactory.proxy()`, but that doesn't work because it makes the factory the `msg.sender` in the CTF contract, not the proxy wallet.
+Previous versions had a bug where `redeemPositions` was called directly from the signer wallet, resulting in `payout=0` because the signer doesn't hold any tokens (the proxy wallet does).
 
-**How it actually works:**
-- Polymarket Magic/Email accounts use a Proxy Wallet pattern
-- The proxy wallet has an `execute(address to, bytes data)` function
-- Only the owner (your signer wallet) can call this function
-- When you call `proxyWallet.execute(CTF, redeemPositions(...))`, the proxy wallet becomes `msg.sender` in the CTF contract
-- This allows the CTF to correctly verify that the caller owns the tokens
+**The fix (V35.12.2):**
+- When `POLYMARKET_ADDRESS` (proxy) differs from the signer, we now ALWAYS use the proxy path
+- We call `proxyWallet.execute(CTF, redeemPositions(...))` which makes the proxy wallet the `msg.sender` in the CTF contract
+- This ensures the CTF contract sees the correct token holder and pays out correctly
 
 **Wallet architecture (Magic/Email accounts):**
 ```
 Signer (EOA) ─────► Proxy Wallet ─────► CTF Contract
     │                    │                   │
-    │ calls execute()    │ becomes msg.sender│ redeems tokens
+    │ calls execute()    │ becomes msg.sender│ redeems tokens → payout > 0
     │ pays gas           │ holds tokens      │
     └────────────────────┴───────────────────┘
 ```
@@ -152,7 +150,7 @@ Signer (EOA) ─────► Proxy Wallet ─────► CTF Contract
 2. Ensure the signer wallet has MATIC for gas (~0.05 MATIC per claim)
 3. Check that the signer is the owner of the proxy (should be automatic for Magic exports)
 4. Set `POLYMARKET_SIGNATURE_TYPE=1` for Magic/Email or `=2` for Safe/Browser wallets
-5. Run `npm run claim:debug` to diagnose issues
+5. Run `docker exec -it trading-bot npm run claim:debug` to diagnose issues
 
 **Manual claiming (fallback):**
 1. Go to https://polymarket.com/portfolio
