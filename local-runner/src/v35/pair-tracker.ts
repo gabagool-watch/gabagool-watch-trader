@@ -588,9 +588,14 @@ export class PairTracker {
       console.log(`[PairTracker] ⚠️ Ideal price $${idealMakerPrice.toFixed(2)} < $${POLYMARKET_MIN_PRICE} min, falling back to $${actualMakerPrice.toFixed(2)} (${(actualMargin * 100).toFixed(1)}¢ margin)`);
     }
     
-    // Final check: is there ANY profit margin?
-    if (actualMargin < 0.01) {
-      console.log(`[PairTracker] 🔴 BLOCKED: No viable margin (${(actualMargin * 100).toFixed(1)}¢ < 1¢)`);
+    // V36.8: CPP-LEIDEND - Check projected CPP, NOT current combined best ask!
+    // We place limit orders on maker side, so we don't care if current combined ask > $1.00.
+    // What matters is: takerPrice + makerLimitPrice = projected CPP
+    const projectedCpp = expensiveAsk + actualMakerPrice;
+    
+    // Only block if our projected CPP (with our limit order) exceeds target
+    if (projectedCpp > this.config.targetCpp) {
+      console.log(`[PairTracker] 🔴 BLOCKED: Projected CPP $${projectedCpp.toFixed(3)} > target $${this.config.targetCpp.toFixed(2)}`);
       logPairEvent({
         pairId: `blocked_${Date.now()}`,
         eventType: 'pair_blocked',
@@ -602,9 +607,14 @@ export class PairTracker {
         makerSide: cheapSide,
         makerPrice: actualMakerPrice,
         makerSize: size,
-        status: 'no_viable_margin',
+        status: 'cpp_above_target',
       });
-      return { success: false, error: 'no_viable_margin' };
+      return { success: false, error: 'cpp_above_target' };
+    }
+    
+    // Log the margin as info (not a blocker)
+    if (actualMargin < 0.03) {
+      console.log(`[PairTracker] ⚠️ Low margin: ${(actualMargin * 100).toFixed(1)}¢ (INFO - not blocking, CPP $${projectedCpp.toFixed(3)} OK)`);
     }
     
     console.log(`[PairTracker] 📊 DYNAMIC MARGIN: delta=${delta.toFixed(0)} (${confidenceLevel}) → target=${(targetMargin * 100).toFixed(0)}¢, actual=${(actualMargin * 100).toFixed(1)}¢`);
