@@ -319,6 +319,14 @@ function initializeRedeemer(): void {
   console.log(`   📍 Signer (EOA): ${wallet.address}`);
   console.log(`   📍 Proxy wallet (config): ${config.polymarket.address || 'not set'}`);
 
+  // === DEBUG: Builder API credentials check ===
+  console.log(`\n🔍 DEBUG: Builder API credentials check:`);
+  console.log(`   POLY_BUILDER_API_KEY: ${config.polymarket.builderApiKey ? `✅ set (${config.polymarket.builderApiKey.length} chars)` : '❌ MISSING'}`);
+  console.log(`   POLY_BUILDER_API_SECRET: ${config.polymarket.builderApiSecret ? `✅ set (${config.polymarket.builderApiSecret.length} chars)` : '❌ MISSING'}`);
+  console.log(`   POLY_BUILDER_PASSPHRASE: ${config.polymarket.builderPassphrase ? `✅ set (${config.polymarket.builderPassphrase.length} chars)` : '❌ MISSING'}`);
+  console.log(`   hasBuilderCredentials(): ${hasBuilderCredentials() ? '✅ TRUE - Relayer API enabled' : '❌ FALSE - Direct on-chain mode'}`);
+  console.log(`   POLYMARKET_SIGNATURE_TYPE: ${config.polymarket.signatureType ?? 'not set (auto-detect)'}`);
+
   // Detect wallet type
   if (!proxyAddress) {
     console.log(`\n⚠️ No POLYMARKET_ADDRESS set - will try direct EOA claiming`);
@@ -326,8 +334,12 @@ function initializeRedeemer(): void {
     console.log(`\n✅ Signer = Proxy (EOA mode) - direct claiming supported`);
   } else {
     console.log(`\n🔐 Signer ≠ Proxy (Proxy wallet mode)`);
-    console.log(`   ✅ Automated claiming supported (V35.10.2+)`);
-    console.log(`   ⚠️  Ensure SIGNER has enough MATIC for gas (not the proxy)`);
+    if (hasBuilderCredentials()) {
+      console.log(`   ✅ Builder credentials found - will use Relayer API (gasless)`);
+    } else {
+      console.log(`   ⚠️ No Builder credentials - will attempt direct on-chain claiming`);
+      console.log(`   ⚠️ Ensure SIGNER has enough MATIC for gas (not the proxy)`);
+    }
   }
 }
 
