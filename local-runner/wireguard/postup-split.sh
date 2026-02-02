@@ -36,6 +36,7 @@ fi
 POLYMARKET_DOMAINS=(
   "clob.polymarket.com"
   "gamma-api.polymarket.com"
+  "relayer.polymarket.com"
   "polymarket.com"
   "strapi-matic.poly.market"
   "data-api.polymarket.com"
