@@ -49,13 +49,55 @@ export function V35ExpirySnapshots() {
         .from("v35_expiry_snapshots")
         .select("*")
         .order("expiry_time", { ascending: false })
-        .limit(50);
+        .limit(100); // Fetch more for better averages
 
       if (error) throw error;
       return data as ExpirySnapshot[];
     },
     refetchInterval: 30000,
   });
+
+  // Calculate P&L for a snapshot
+  const calculatePnL = (snapshot: ExpirySnapshot): number => {
+    const totalCost = snapshot.total_cost || (snapshot.api_up_cost + snapshot.api_down_cost);
+    const winner = snapshot.predicted_winning_side;
+    if (!winner) return 0;
+    const winningShares = winner === 'UP' ? snapshot.api_up_qty : snapshot.api_down_qty;
+    return (winningShares * 1.0) - totalCost;
+  };
+
+  // Calculate average P&L for different time windows
+  const calculateTimeWindowStats = (hours: number) => {
+    if (!snapshots || snapshots.length === 0) return { avgPnl: 0, count: 0, wins: 0, losses: 0 };
+    
+    const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
+    const filtered = snapshots.filter(s => 
+      new Date(s.expiry_time) > cutoff && 
+      s.total_cost > 0 &&
+      s.predicted_winning_side
+    );
+    
+    if (filtered.length === 0) return { avgPnl: 0, count: 0, wins: 0, losses: 0 };
+    
+    const pnls = filtered.map(s => calculatePnL(s));
+    const totalPnl = pnls.reduce((sum, pnl) => sum + pnl, 0);
+    const wins = pnls.filter(p => p > 0).length;
+    const losses = pnls.filter(p => p < 0).length;
+    
+    return {
+      avgPnl: totalPnl / filtered.length,
+      totalPnl,
+      count: filtered.length,
+      wins,
+      losses,
+      winRate: filtered.length > 0 ? (wins / filtered.length) * 100 : 0
+    };
+  };
+
+  const stats1h = calculateTimeWindowStats(1);
+  const stats4h = calculateTimeWindowStats(4);
+  const stats12h = calculateTimeWindowStats(12);
+  const stats24h = calculateTimeWindowStats(24);
 
   // Fetch inventory snapshots for selected market - reliable position timeline from runner
   const { data: inventorySnapshots, isLoading: inventoryLoading } = useQuery({
@@ -142,7 +184,48 @@ export function V35ExpirySnapshots() {
             <Camera className="h-5 w-5" />
             Market Expiry Snapshots
           </CardTitle>
-          <div className="flex gap-4 text-sm text-muted-foreground">
+          
+          {/* P&L Averages per time window */}
+          <div className="grid grid-cols-4 gap-3 mt-3">
+            <div className={`rounded-lg p-3 ${stats1h.totalPnl >= 0 ? "bg-primary/10" : "bg-destructive/10"}`}>
+              <div className="text-xs text-muted-foreground">Laatste 1 uur</div>
+              <div className={`font-bold ${stats1h.totalPnl >= 0 ? "text-primary" : "text-destructive"}`}>
+                {stats1h.totalPnl >= 0 ? "+" : ""}${stats1h.totalPnl.toFixed(2)}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {stats1h.count} markets • {stats1h.winRate.toFixed(0)}% WR
+              </div>
+            </div>
+            <div className={`rounded-lg p-3 ${stats4h.totalPnl >= 0 ? "bg-primary/10" : "bg-destructive/10"}`}>
+              <div className="text-xs text-muted-foreground">Laatste 4 uur</div>
+              <div className={`font-bold ${stats4h.totalPnl >= 0 ? "text-primary" : "text-destructive"}`}>
+                {stats4h.totalPnl >= 0 ? "+" : ""}${stats4h.totalPnl.toFixed(2)}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {stats4h.count} markets • {stats4h.winRate.toFixed(0)}% WR
+              </div>
+            </div>
+            <div className={`rounded-lg p-3 ${stats12h.totalPnl >= 0 ? "bg-primary/10" : "bg-destructive/10"}`}>
+              <div className="text-xs text-muted-foreground">Laatste 12 uur</div>
+              <div className={`font-bold ${stats12h.totalPnl >= 0 ? "text-primary" : "text-destructive"}`}>
+                {stats12h.totalPnl >= 0 ? "+" : ""}${stats12h.totalPnl.toFixed(2)}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {stats12h.count} markets • {stats12h.winRate.toFixed(0)}% WR
+              </div>
+            </div>
+            <div className={`rounded-lg p-3 ${stats24h.totalPnl >= 0 ? "bg-primary/10" : "bg-destructive/10"}`}>
+              <div className="text-xs text-muted-foreground">Laatste 24 uur</div>
+              <div className={`font-bold ${stats24h.totalPnl >= 0 ? "text-primary" : "text-destructive"}`}>
+                {stats24h.totalPnl >= 0 ? "+" : ""}${stats24h.totalPnl.toFixed(2)}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {stats24h.count} markets • {stats24h.winRate.toFixed(0)}% WR • Avg ${stats24h.avgPnl.toFixed(2)}/bet
+              </div>
+            </div>
+          </div>
+          
+          <div className="flex gap-4 text-sm text-muted-foreground mt-3">
             <span>📊 {totalSnapshots} snapshots</span>
             <span>💰 ${totalLockedProfit.toFixed(2)} locked profit</span>
             <span>📈 Avg CPP: ${avgCPP.toFixed(4)}</span>
