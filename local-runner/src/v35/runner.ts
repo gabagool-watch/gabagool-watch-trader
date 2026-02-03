@@ -1,12 +1,13 @@
 // ============================================================
 // V36 RUNNER - PAIR-BASED MARKET MAKING
 // ============================================================
+// Version: V36.10.0 - "Dynamic CPP Escalation"
 // Version: V36.4.3 - "Fill Audit Fallback"
 //
-// V36.4.3 KEY CHANGES:
-// - Early Whitelisting: orderId registered BEFORE verification delay
-// - Fill Audit Fallback: Poll API for fills if WebSocket misses them
-// - Guarantees ALL fills are logged to database, zero data loss
+// V36.10.0 KEY CHANGES:
+// - Dynamic CPP Escalation: Maker prices escalate over time (0.93 → 1.00)
+// - Guarantees hedging even at break-even rather than risking reversal loss
+// - Schedule: 0s→0.93, 30s→0.95, 60s→0.97, 90s→0.99, 120s→1.00
 //
 // V36.3.6 KEY CHANGES:
 // - FIX: Reset pairs when market expires to prevent stale pairs blocking new trades
@@ -867,12 +868,20 @@ async function processMarket(market: V35Market): Promise<void> {
   // =========================================================================
   // V36.1: PAIR TRACKER - CHECK TIMEOUTS
   // V36.4.3: FILL AUDIT FALLBACK - Poll API for missed WebSocket fills
+  // V36.10: CPP ESCALATION - Raise maker prices over time for guaranteed hedging
   // =========================================================================
   const pairTracker = getPairTracker();
   await pairTracker.checkTimeouts(market);
   
   // V36.4.3: Audit WAITING_HEDGE pairs for missed fills every tick
   await pairTracker.auditMakerFills(market);
+  
+  // V36.10: Check and escalate maker order prices as time passes
+  // This guarantees hedging by raising CPP from 0.93 → 0.95 → 0.97 → 0.99 → 1.00
+  const escalationResult = await pairTracker.checkCppEscalation(market);
+  if (escalationResult.escalated > 0) {
+    log(`   📈 V36.10: Escalated ${escalationResult.escalated}/${escalationResult.checked} maker orders to higher CPP`);
+  }
   
   // Log pair tracker stats periodically
   const pairStats = pairTracker.getStats();
@@ -939,8 +948,9 @@ async function processMarket(market: V35Market): Promise<void> {
       const cheapBid = cheapSide === 'UP' ? (market.upBestBid || 0) : (market.downBestBid || 0);
       const cheapAsk = cheapSide === 'UP' ? (market.upBestAsk || 1) : (market.downBestAsk || 1);
       
-      // V36.2: Log analysis (no CPP check - we always enter)
-      const targetCpp = 0.95;
+      // V36.10: Start with lower target CPP for better margin
+      // The CPP will escalate over time (0.93 → 0.95 → 0.97 → 0.99 → 1.00)
+      const targetCpp = 0.93;  // V36.10: Lower starting point
       const projectedMakerPrice = targetCpp - takerPrice;
       const projectedCpp = takerPrice + Math.max(0.05, projectedMakerPrice);
       
