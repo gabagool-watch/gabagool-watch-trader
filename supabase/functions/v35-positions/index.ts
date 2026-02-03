@@ -358,11 +358,27 @@ function extractMarketSlug(position: PolymarketPosition): string {
 }
 
 function extractAsset(position: PolymarketPosition): string {
+  // Check both market title AND eventSlug for asset identification
   const market = position.market.toLowerCase();
-  if (market.includes('btc') || market.includes('bitcoin')) return 'BTC';
-  if (market.includes('eth') || market.includes('ethereum')) return 'ETH';
-  if (market.includes('sol') || market.includes('solana')) return 'SOL';
-  if (market.includes('xrp')) return 'XRP';
+  const slug = (position.eventSlug || '').toLowerCase();
+  const combined = market + ' ' + slug;
+  
+  // BTC variants
+  if (combined.includes('btc') || combined.includes('bitcoin') || combined.includes('btcusd')) return 'BTC';
+  // ETH variants  
+  if (combined.includes('eth') || combined.includes('ethereum') || combined.includes('ethusd')) return 'ETH';
+  // SOL variants
+  if (combined.includes('sol') || combined.includes('solana') || combined.includes('solusd')) return 'SOL';
+  // XRP variants
+  if (combined.includes('xrp') || combined.includes('ripple') || combined.includes('xrpusd')) return 'XRP';
+  
+  // Fallback: try to extract from slug pattern like "btc-updown-15m-xxx"
+  if (slug.startsWith('btc-')) return 'BTC';
+  if (slug.startsWith('eth-')) return 'ETH';
+  if (slug.startsWith('sol-')) return 'SOL';
+  if (slug.startsWith('xrp-')) return 'XRP';
+  
+  console.log(`⚠️ Could not identify asset from: market="${position.market}", slug="${position.eventSlug}"`);
   return 'UNKNOWN';
 }
 
