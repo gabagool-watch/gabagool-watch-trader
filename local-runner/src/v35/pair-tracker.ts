@@ -913,6 +913,12 @@ export class PairTracker {
    * V36.3.1: Place maker order - PRIVATE METHOD
    * This is the ONLY place a maker order is created!
    * 
+   * V36.12: TIERED MAKER ORDERS
+   * When makerPrice >= $0.20, split into 3 orders at different CPP targets:
+   * - 30% at CPP 0.96 (safest, fills first)
+   * - 30% at CPP 0.95 (middle)
+   * - 40% at CPP 0.94 (most profit, fills last)
+   * 
    * CRITICAL FIX: Set makerPlaced=true BEFORE the async call to prevent race conditions
    * 
    * V36.4.3 CRITICAL FIX: Early Whitelisting
@@ -939,31 +945,48 @@ export class PairTracker {
     pair.makerPlaced = true;
     console.log(`[PairTracker] 🔒 Locked makerPlaced=true for ${pair.id} (preventing race conditions)`);
     
-    // Calculate maker price: targetCpp - takerFillPrice
-    const makerPrice = this.config.targetCpp - takerFilledPrice;
+    // Calculate base maker price: targetCpp - takerFillPrice
+    const baseMakerPrice = this.config.targetCpp - takerFilledPrice;
     
-    if (makerPrice < 0.05) {
-      console.log(`[PairTracker] ⚠️ Maker price too low: $${makerPrice.toFixed(3)}`);
+    if (baseMakerPrice < 0.05) {
+      console.log(`[PairTracker] ⚠️ Maker price too low: $${baseMakerPrice.toFixed(3)}`);
       pair.makerPlaced = false; // Release lock on failure
       return { success: false, error: 'maker_price_too_low' };
     }
     
-    const clampedMakerPrice = Math.min(0.95, Math.max(0.05, makerPrice));
     const makerTokenId = pair.makerSide === 'UP' ? market.upTokenId : market.downTokenId;
+    
+    // =========================================================================
+    // V36.12: TIERED MAKER ORDERS
+    // =========================================================================
+    // When price >= $0.20 AND size allows splitting (each tier >= 3 shares),
+    // place 3 separate orders at different CPP targets for better fill probability.
+    //
+    // Tiers (based on CPP target, not maker price):
+    // - Tier 1 (30%): CPP 0.96 → makerPrice = 0.96 - takerPrice (highest, safest)
+    // - Tier 2 (30%): CPP 0.95 → makerPrice = 0.95 - takerPrice (middle)
+    // - Tier 3 (40%): CPP 0.94 → makerPrice = 0.94 - takerPrice (lowest, most profit)
+    // =========================================================================
+    const TIERED_MIN_PRICE = 0.20;  // Only tier when maker price >= 20¢
+    const TIERED_MIN_SHARES_PER_TIER = 3;  // Need at least 3 shares per tier
+    const MIN_ORDER_VALUE = 1.00;
+    
+    const canUseTieredOrders = 
+      baseMakerPrice >= TIERED_MIN_PRICE && 
+      takerFilledSize >= TIERED_MIN_SHARES_PER_TIER * 3;  // At least 9 shares total
+    
+    if (canUseTieredOrders) {
+      return this.placeTieredMakerOrders(pair, market, takerFilledPrice, takerFilledSize, makerTokenId);
+    }
+    
+    // =========================================================================
+    // STANDARD SINGLE MAKER ORDER (price < $0.20 or not enough shares)
+    // =========================================================================
+    const clampedMakerPrice = Math.min(0.95, Math.max(0.05, baseMakerPrice));
     
     // =========================================================================
     // V36.5.2: FIFO HEDGE AGGREGATION
     // =========================================================================
-    // When maker size needs scaling for $1 minimum, check if we can hedge
-    // multiple older takers with the same order (more capital efficient).
-    //
-    // Example:
-    //   - Taker A: 10 UP @ $0.90 (waiting for hedge)
-    //   - Taker B: 10 UP @ $0.91 (waiting for hedge) <- current
-    //   - Maker price: $0.05 -> need ceil($1 / $0.05) = 20 shares minimum
-    //   - Solution: One 20-share maker hedges BOTH takers!
-    // =========================================================================
-    const MIN_ORDER_VALUE = 1.00;
     const minSharesForMaker = Math.ceil(MIN_ORDER_VALUE / clampedMakerPrice);
     
     // Find other unhedged pairs that need the same maker side (FIFO order)
@@ -1015,7 +1038,7 @@ export class PairTracker {
     }
     
     console.log(`[PairTracker] 📝 Placing MAKER: ${makerSize} ${pair.makerSide} @ $${clampedMakerPrice.toFixed(3)}`);
-    console.log(`[PairTracker]    Calculation: $${this.config.targetCpp.toFixed(2)} - $${takerFilledPrice.toFixed(3)} = $${makerPrice.toFixed(3)}`);
+    console.log(`[PairTracker]    Calculation: $${this.config.targetCpp.toFixed(2)} - $${takerFilledPrice.toFixed(3)} = $${baseMakerPrice.toFixed(3)}`);
     
     try {
       const makerResult = await placeOrder({
@@ -1095,6 +1118,134 @@ export class PairTracker {
       pair.makerPlaced = false; // Release lock on failure
       return { success: false, error: err?.message };
     }
+  }
+  
+  /**
+   * V36.12: Place tiered maker orders at different CPP targets
+   * 
+   * Split the maker hedge into 3 orders:
+   * - Tier 1 (30%): CPP 0.96 - highest price, fills first
+   * - Tier 2 (30%): CPP 0.95 - middle price
+   * - Tier 3 (40%): CPP 0.94 - lowest price, most profit
+   * 
+   * This spreads orders across the orderbook for better fill probability.
+   */
+  private async placeTieredMakerOrders(
+    pair: PendingPair,
+    market: V35Market,
+    takerFilledPrice: number,
+    takerFilledSize: number,
+    makerTokenId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    
+    // Define tiers: [percentage, cppTarget]
+    const tiers: Array<{ pct: number; cpp: number }> = [
+      { pct: 0.30, cpp: 0.96 },  // 30% at CPP 0.96 (safest)
+      { pct: 0.30, cpp: 0.95 },  // 30% at CPP 0.95 (middle)
+      { pct: 0.40, cpp: 0.94 },  // 40% at CPP 0.94 (most profit)
+    ];
+    
+    // Calculate sizes for each tier
+    const tierOrders = tiers.map(tier => {
+      const size = Math.floor(takerFilledSize * tier.pct);
+      const makerPrice = Math.min(0.95, Math.max(0.05, tier.cpp - takerFilledPrice));
+      return { size, makerPrice, cpp: tier.cpp };
+    });
+    
+    // Distribute remainder to last tier
+    const totalAllocated = tierOrders.reduce((sum, t) => sum + t.size, 0);
+    const remainder = takerFilledSize - totalAllocated;
+    if (remainder > 0) {
+      tierOrders[tierOrders.length - 1].size += remainder;
+    }
+    
+    // Filter out tiers with 0 size
+    const validTiers = tierOrders.filter(t => t.size > 0);
+    
+    console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+    console.log(`[PairTracker] 🎯 V36.12: TIERED MAKER ORDERS (${validTiers.length} tiers)`);
+    console.log(`[PairTracker]    TAKER: ${takerFilledSize} ${pair.takerSide} @ $${takerFilledPrice.toFixed(2)} (filled)`);
+    validTiers.forEach((tier, i) => {
+      console.log(`[PairTracker]    Tier ${i + 1}: ${tier.size} ${pair.makerSide} @ $${tier.makerPrice.toFixed(3)} (CPP $${tier.cpp.toFixed(2)})`);
+    });
+    console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
+    
+    const placedOrderIds: string[] = [];
+    let totalPlacedSize = 0;
+    let weightedPriceSum = 0;
+    
+    // Place all tier orders
+    for (const tier of validTiers) {
+      try {
+        console.log(`[PairTracker] 📝 Placing tier: ${tier.size} ${pair.makerSide} @ $${tier.makerPrice.toFixed(3)}`);
+        
+        const result = await placeOrder({
+          tokenId: makerTokenId,
+          side: 'BUY',
+          price: tier.makerPrice,
+          size: tier.size,
+          orderType: 'GTC',
+        });
+        
+        if (result.success && result.orderId) {
+          registerOurOrderId(result.orderId);
+          placedOrderIds.push(result.orderId);
+          totalPlacedSize += tier.size;
+          weightedPriceSum += tier.size * tier.makerPrice;
+          console.log(`[PairTracker] ✓ Tier placed: ${result.orderId.slice(0, 8)}...`);
+        } else {
+          console.log(`[PairTracker] ⚠️ Tier failed: ${result.error}`);
+        }
+      } catch (err: any) {
+        console.error(`[PairTracker] Tier error:`, err?.message);
+      }
+    }
+    
+    if (placedOrderIds.length === 0) {
+      console.log(`[PairTracker] ❌ All tiered orders failed!`);
+      pair.makerPlaced = false;
+      return { success: false, error: 'all_tiered_orders_failed' };
+    }
+    
+    // Calculate weighted average maker price
+    const avgMakerPrice = weightedPriceSum / totalPlacedSize;
+    
+    // Update pair with tiered order info
+    // Store first order as primary (for fill tracking - all are registered)
+    pair.makerOrderId = placedOrderIds[0];
+    pair.makerPrice = avgMakerPrice;
+    pair.makerSize = totalPlacedSize;
+    pair.status = 'WAITING_HEDGE';
+    pair.updatedAt = Date.now();
+    
+    // Store all order IDs in linked field for tracking
+    pair.linkedPairIds = placedOrderIds;  // Reuse field for tiered order IDs
+    
+    console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+    console.log(`[PairTracker] 🟠 ${pair.id} TIERED MAKERS PLACED`);
+    console.log(`[PairTracker]    Orders: ${placedOrderIds.length}/${validTiers.length} successful`);
+    console.log(`[PairTracker]    Total size: ${totalPlacedSize} shares`);
+    console.log(`[PairTracker]    Avg maker price: $${avgMakerPrice.toFixed(3)}`);
+    console.log(`[PairTracker]    Projected CPP: $${(takerFilledPrice + avgMakerPrice).toFixed(3)}`);
+    console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
+    
+    // Log pair event
+    logPairEvent({
+      pairId: pair.id,
+      eventType: 'pair_maker_tiered',
+      marketSlug: market.slug,
+      asset: market.asset,
+      takerSide: pair.takerSide,
+      takerPrice: takerFilledPrice,
+      takerSize: takerFilledSize,
+      makerSide: pair.makerSide,
+      makerPrice: avgMakerPrice,
+      makerSize: totalPlacedSize,
+      tieredOrderCount: placedOrderIds.length,
+      status: 'WAITING_HEDGE',
+    }).catch(() => {});
+    
+    return { success: true };
   }
   
   /**
