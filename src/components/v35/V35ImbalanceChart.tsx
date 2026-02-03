@@ -42,9 +42,11 @@ interface V35ImbalanceChartProps {
     fill_price: number;
     fill_qty: number;
   }>;
+  // Sync ID for synchronized tooltips across charts
+  syncId?: string;
 }
 
-export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, groundTruth, fills }: V35ImbalanceChartProps) {
+export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, groundTruth, fills, syncId }: V35ImbalanceChartProps) {
   const chartData = useMemo(() => {
     // Use inventory snapshots as the primary data source (reliable position state)
     if (!inventorySnapshots || inventorySnapshots.length === 0) {
@@ -281,7 +283,7 @@ export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, grou
         {/* Main chart: UP vs DOWN shares over time */}
         <div className="h-[250px]">
           <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={chartData.data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+            <ComposedChart data={chartData.data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }} syncId={syncId}>
               <defs>
                 <linearGradient id="upGradientInv" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
