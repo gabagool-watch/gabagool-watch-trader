@@ -164,7 +164,8 @@ export function createEmptyMarket(
   upTokenId: string,
   downTokenId: string,
   asset: V35Asset,
-  expiry: Date
+  expiry: Date,
+  strikePrice?: number  // V36.8.1: Add strike price parameter
 ): V35Market {
   return {
     slug,
@@ -173,6 +174,7 @@ export function createEmptyMarket(
     downTokenId,
     asset,
     expiry,
+    strikePrice,  // V36.8.1: Pass through strike price
     upBestBid: 0,
     upBestAsk: 1,
     downBestBid: 0,

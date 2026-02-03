@@ -489,7 +489,12 @@ async function refreshMarkets(): Promise<void> {
       break;
     }
     if (markets.has(m.slug)) {
-      log(`📊 Skipping ${m.slug}: already tracked`);
+      // V36.8.1: Update strike price if we didn't have it before
+      const existingMarket = markets.get(m.slug)!;
+      if (!existingMarket.strikePrice && m.strikePrice) {
+        existingMarket.strikePrice = m.strikePrice;
+        log(`📊 Updated strike price for ${m.slug}: $${m.strikePrice.toFixed(2)}`);
+      }
       continue;
     }
     
@@ -499,7 +504,8 @@ async function refreshMarkets(): Promise<void> {
       m.upTokenId,
       m.downTokenId,
       m.asset,
-      m.expiry
+      m.expiry,
+      m.strikePrice  // V36.8.1: Pass strike price from discovery
     );
     
     // CRITICAL: Register market with position cache for real-time position tracking
@@ -1408,7 +1414,7 @@ async function main(): Promise<void> {
         up_best_ask: m.upBestAsk ? m.upBestAsk : null,
         down_best_bid: m.downBestBid ? m.downBestBid : null,
         down_best_ask: m.downBestAsk ? m.downBestAsk : null,
-        strike_price: null,
+        strike_price: m.strikePrice ?? null,  // V36.8.1: Use market's strike price
         run_id: RUN_ID,
       });
     }
