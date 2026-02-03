@@ -1,6 +1,7 @@
 // ============================================================
 // V36 PAIR TRACKER - INDEPENDENT PAIR LIFECYCLE MANAGEMENT
 // ============================================================
+// Version: V36.10.0 - "Dynamic CPP Escalation"
 // Version: V36.7.0 - "Dynamic Delta Margin"
 // Version: V36.6.0 - "Risk Guards - Share Gap Guard"
 // Version: V36.5.3 - "Maker Inventory Pre-Hedging"
@@ -123,7 +124,7 @@ export interface PairTrackerConfig {
 const DEFAULT_CONFIG: PairTrackerConfig = {
   maxPendingPairs: 5,               // V36.5.0: 5 concurrent pairs for better throughput
   maxPendingPairsReversal: 8,       // V36.6: +3 extra pairs during reversal (5 + 3)
-  targetCpp: 0.95,
+  targetCpp: 0.93,                  // V36.10: Start lower for better profit margin
   emergencyMaxCpp: 1.05,
   emergencyTakerOffset: 0.005,
   minSharesPerPair: 5,
@@ -131,6 +132,29 @@ const DEFAULT_CONFIG: PairTrackerConfig = {
   startupDelayMs: 60_000,            // 1 MINUTE observation period
   pairCooldownMs: 20_000,            // V36.3.4: 20 seconds between new pairs
 };
+
+// ============================================================
+// V36.10: CPP ESCALATION SCHEDULE
+// ============================================================
+// The maker order price ESCALATES over time to ensure hedging:
+// - Start at targetCpp (0.93) for maximum profit margin
+// - After 30s:  escalate to 0.95 (+2ct)
+// - After 60s:  escalate to 0.97 (+4ct)
+// - After 90s:  escalate to 0.99 (+6ct)
+// - After 120s: escalate to 1.00 (break-even, but HEDGED!)
+// ============================================================
+interface CppEscalationStep {
+  afterMs: number;
+  maxCpp: number;
+}
+
+const CPP_ESCALATION_SCHEDULE: CppEscalationStep[] = [
+  { afterMs: 0,       maxCpp: 0.93 },   // Initial: best margin
+  { afterMs: 30_000,  maxCpp: 0.95 },   // 30s: slightly higher
+  { afterMs: 60_000,  maxCpp: 0.97 },   // 60s: getting urgent
+  { afterMs: 90_000,  maxCpp: 0.99 },   // 90s: near break-even
+  { afterMs: 120_000, maxCpp: 1.00 },   // 120s: break-even guaranteed hedge
+];
 
 // ============================================================
 // V36.5.3: MAKER INVENTORY - Pre-hedge surplus shares
@@ -1426,6 +1450,162 @@ export class PairTracker {
         }
       }
     }
+  }
+  
+  // =========================================================================
+  // V36.10: DYNAMIC CPP ESCALATION
+  // =========================================================================
+  // As time passes, we RAISE the maker order price to guarantee hedging.
+  // This trades some profit for certainty - a $0.02 profit is better than
+  // a $0.30+ loss from an unhedged reversal.
+  // =========================================================================
+  
+  /**
+   * Get the current escalated CPP target for a pair based on how long it's been waiting
+   */
+  private getEscalatedCpp(pair: PendingPair): number {
+    if (!pair.takerFilledAt) return this.config.targetCpp;
+    
+    const waitingMs = Date.now() - pair.takerFilledAt;
+    
+    // Find the highest CPP threshold we've passed
+    let escalatedCpp = this.config.targetCpp;
+    for (const step of CPP_ESCALATION_SCHEDULE) {
+      if (waitingMs >= step.afterMs) {
+        escalatedCpp = step.maxCpp;
+      } else {
+        break;
+      }
+    }
+    
+    return escalatedCpp;
+  }
+  
+  /**
+   * V36.10: Check and replace maker orders with higher prices as time passes
+   * 
+   * This is the core of the CPP escalation strategy:
+   * 1. Check each WAITING_HEDGE pair's age
+   * 2. Calculate what CPP level we should be at
+   * 3. If our current maker price is too low, cancel and replace with higher price
+   */
+  async checkCppEscalation(market: V35Market): Promise<{ 
+    checked: number; 
+    escalated: number; 
+    errors: string[] 
+  }> {
+    const config = getV35Config();
+    const errors: string[] = [];
+    let checked = 0;
+    let escalated = 0;
+    
+    for (const pair of this.pairs.values()) {
+      // Only check WAITING_HEDGE pairs with a maker order for this market
+      if (pair.status !== 'WAITING_HEDGE') continue;
+      if (pair.marketSlug !== market.slug) continue;
+      if (!pair.makerOrderId) continue;
+      if (!pair.takerFilledAt) continue;
+      
+      checked++;
+      
+      const takerCost = pair.takerFilledPrice || pair.takerPrice;
+      const currentMakerPrice = pair.makerPrice;
+      const currentCpp = takerCost + currentMakerPrice;
+      
+      // What CPP should we be at now?
+      const escalatedCpp = this.getEscalatedCpp(pair);
+      const newMakerPrice = escalatedCpp - takerCost;
+      
+      // Skip if we don't need to escalate yet
+      // (current CPP is already at or above escalated level)
+      if (currentCpp >= escalatedCpp - 0.005) continue;  // 0.5ct tolerance
+      
+      // Skip if new maker price would be unreasonable
+      if (newMakerPrice < 0.05 || newMakerPrice > 0.95) continue;
+      
+      const waitingMs = Date.now() - pair.takerFilledAt;
+      const waitingSec = Math.round(waitingMs / 1000);
+      
+      console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+      console.log(`[PairTracker] 📈 V36.10: CPP ESCALATION - ${pair.id}`);
+      console.log(`[PairTracker]    Waiting: ${waitingSec}s`);
+      console.log(`[PairTracker]    Current: MAKER @ $${currentMakerPrice.toFixed(3)} → CPP $${currentCpp.toFixed(3)}`);
+      console.log(`[PairTracker]    Target:  MAKER @ $${newMakerPrice.toFixed(3)} → CPP $${escalatedCpp.toFixed(3)}`);
+      console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
+      
+      if (config.dryRun) {
+        console.log(`[PairTracker] 🚫 DRY RUN: Would escalate maker price`);
+        continue;
+      }
+      
+      // Cancel the existing maker order
+      try {
+        await cancelOrder(pair.makerOrderId);
+        console.log(`[PairTracker] 🗑️ Cancelled old maker: ${pair.makerOrderId.slice(0, 12)}...`);
+      } catch (err: any) {
+        console.warn(`[PairTracker] ⚠️ Cancel failed (may already be filled):`, err?.message);
+        // Continue anyway - the order might have filled
+        continue;
+      }
+      
+      // Place new maker order at higher price
+      const makerTokenId = pair.makerSide === 'UP' ? market.upTokenId : market.downTokenId;
+      const makerSize = pair.makerSize || pair.takerFilledSize || pair.takerSize;
+      
+      try {
+        const result = await placeOrder({
+          tokenId: makerTokenId,
+          side: 'BUY',
+          price: newMakerPrice,
+          size: makerSize,
+          orderType: 'GTC',
+        });
+        
+        if (!result.success || !result.orderId) {
+          const errorMsg = `Escalation failed for ${pair.id}: ${result.error}`;
+          errors.push(errorMsg);
+          console.log(`[PairTracker] ❌ ${errorMsg}`);
+          // Mark as needing attention
+          pair.makerPlaced = false;
+          continue;
+        }
+        
+        // Update pair with new order
+        registerOurOrderId(result.orderId);
+        pair.makerOrderId = result.orderId;
+        pair.makerPrice = newMakerPrice;
+        pair.updatedAt = Date.now();
+        
+        escalated++;
+        console.log(`[PairTracker] ✅ Escalated maker: ${result.orderId.slice(0, 12)}... @ $${newMakerPrice.toFixed(3)}`);
+        
+        // Log the escalation event
+        logPairEvent({
+          pairId: pair.id,
+          eventType: 'pair_cpp_escalated',
+          marketSlug: market.slug,
+          asset: market.asset,
+          takerSide: pair.takerSide,
+          takerPrice: takerCost,
+          takerSize: pair.takerFilledSize || pair.takerSize,
+          makerSide: pair.makerSide,
+          makerPrice: newMakerPrice,
+          makerSize: makerSize,
+          cpp: escalatedCpp,
+          waitingSeconds: waitingSec,
+          previousCpp: currentCpp,
+          previousMakerPrice: currentMakerPrice,
+          status: 'WAITING_HEDGE',
+        }).catch(() => {});
+        
+      } catch (err: any) {
+        const errorMsg = `Escalation order failed for ${pair.id}: ${err?.message}`;
+        errors.push(errorMsg);
+        console.error(`[PairTracker] ❌ ${errorMsg}`);
+      }
+    }
+    
+    return { checked, escalated, errors };
   }
   
   // =========================================================================
