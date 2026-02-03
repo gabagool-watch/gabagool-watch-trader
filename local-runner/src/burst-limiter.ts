@@ -21,7 +21,7 @@ import { saveBotEvent } from './backend.js';
 
 export const BURST_LIMITER_CONFIG = {
   // Per-market limits
-  maxOrdersPerMinutePerMarket: 6,
+  maxOrdersPerMinutePerMarket: 12,
   minMsBetweenOrdersPerMarket: 2000,
   
   // Sliding window duration
