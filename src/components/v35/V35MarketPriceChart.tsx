@@ -12,6 +12,7 @@ interface V35MarketPriceChartProps {
   startTs: number; // Window start timestamp in ms
   endTs: number;   // Window end timestamp in ms
   targetCpp?: number; // Target CPP (default 0.95) - used for "price to beat" line
+  syncId?: string; // Optional sync ID for synchronized tooltips across charts
 }
 
 interface PriceTick {
@@ -33,15 +34,15 @@ interface ChartPoint {
   strike: number | null;
 }
 
-export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetCpp = 0.95 }: V35MarketPriceChartProps) {
+export function V35MarketPriceChart({ asset, marketSlug, startTs, endTs, targetCpp = 0.95, syncId: externalSyncId }: V35MarketPriceChartProps) {
   const isLive = Date.now() < endTs && Date.now() >= startTs;
   
   // Price to beat: if each side averages this, the pair totals targetCpp
   const priceToBeat = targetCpp / 2;
   const [liveData, setLiveData] = useState<PriceTick[]>([]);
   
-  // Unique syncId for synchronized tooltip/crosshair across charts in this component
-  const syncId = useMemo(() => `v35-chart-${marketSlug}`, [marketSlug]);
+  // Use external syncId if provided, otherwise generate our own
+  const syncId = externalSyncId ?? `v35-chart-${marketSlug}`;
   
   // Fetch historical ticks from database
   const { data: historicalTicks, isLoading, error } = useQuery<PriceTick[]>({

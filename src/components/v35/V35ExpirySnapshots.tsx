@@ -408,6 +408,7 @@ export function V35ExpirySnapshots() {
                   marketSlug={selectedMarket.market_slug}
                   startTs={startTs}
                   endTs={endTs}
+                  syncId={syncId}
                 />
                 
                 {/* Fills Chart - shows orders and fills timeline */}
@@ -432,6 +433,7 @@ export function V35ExpirySnapshots() {
                       total_cost: selectedMarket.total_cost || 0,
                       predicted_pnl: selectedMarket.predicted_pnl || 0,
                     }}
+                    syncId={syncId}
                   />
                 ) : (
                   <div className="py-8 text-center text-muted-foreground">
