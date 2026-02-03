@@ -92,6 +92,8 @@ import {
 import { startAutoClaimLoop, stopAutoClaimLoop } from '../redeemer.js';
 // CRITICAL V36.4.0: Exposure ledger for hard caps
 import { syncPosition as syncPositionToLedger, clearMarket as clearLedgerMarket, getEffectiveExposure } from '../exposure-ledger.js';
+// CRITICAL: Price feed logger for real-time Chainlink RTDS data (strike price accuracy)
+import { startPriceFeedLogger, stopPriceFeedLogger, getPriceFeedLoggerStats } from '../price-feed-ws-logger.js';
 
 // ============================================================
 // CONSTANTS
@@ -1443,6 +1445,13 @@ async function main(): Promise<void> {
   // Give it a moment to connect
   await sleep(2000);
   
+  // CRITICAL: Start price feed logger for Chainlink RTDS data
+  // This logs real-time oracle prices to realtime_price_logs table
+  // Required for accurate strike price determination in chainlink-price-collector
+  log('📡 Starting price feed logger (Chainlink RTDS + Polymarket)...');
+  startPriceFeedLogger();
+  await sleep(1000);
+  
   // =========================================================================
   // V35.1.2: CRITICAL STARTUP SEQUENCE
   // 1. Start position cache FIRST
@@ -1534,6 +1543,8 @@ async function main(): Promise<void> {
     clearInterval(orderbookFlushInterval);
     // Stop auto-claim loop
     stopAutoClaimLoop();
+    // Stop price feed logger
+    stopPriceFeedLogger();
     // Final flush before shutdown
     await flushOrderbookBuffer();
     await stop();
