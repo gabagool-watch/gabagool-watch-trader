@@ -10,6 +10,7 @@ import { format } from "date-fns";
 import { Camera, TrendingUp, AlertTriangle, LineChart } from "lucide-react";
 import { V35ImbalanceChart } from "./V35ImbalanceChart";
 import { V35MarketPriceChart } from "./V35MarketPriceChart";
+import { V35FillsChart } from "./V35FillsChart";
 
 interface ExpirySnapshot {
   id: string;
@@ -393,37 +394,53 @@ export function V35ExpirySnapshots() {
             </DialogTitle>
           </DialogHeader>
           
-          {/* Market Price Chart - shows price movement relative to strike */}
-          {selectedMarket && (
-            <div className="mb-4">
-              <V35MarketPriceChart
-                asset={selectedMarket.asset}
-                marketSlug={selectedMarket.market_slug}
-                startTs={new Date(selectedMarket.expiry_time).getTime() - 15 * 60 * 1000}
-                endTs={new Date(selectedMarket.expiry_time).getTime()}
-              />
-            </div>
-          )}
-
-          {inventoryLoading ? (
-            <div className="py-8 text-center text-muted-foreground">Loading position timeline...</div>
-          ) : inventorySnapshots && inventorySnapshots.length > 0 ? (
-            <V35ImbalanceChart
-              inventorySnapshots={inventorySnapshots}
-              marketSlug={selectedMarket?.market_slug || ""}
-              winner={selectedMarket?.predicted_winning_side as 'UP' | 'DOWN' | undefined}
-              groundTruth={selectedMarket ? {
-                api_up_qty: selectedMarket.api_up_qty,
-                api_down_qty: selectedMarket.api_down_qty,
-                total_cost: selectedMarket.total_cost || 0,
-                predicted_pnl: selectedMarket.predicted_pnl || 0,
-              } : undefined}
-            />
-          ) : (
-            <div className="py-8 text-center text-muted-foreground">
-              No inventory snapshots found for this market
-            </div>
-          )}
+          {/* All charts synchronized with same syncId */}
+          {selectedMarket && (() => {
+            const startTs = new Date(selectedMarket.expiry_time).getTime() - 15 * 60 * 1000;
+            const endTs = new Date(selectedMarket.expiry_time).getTime();
+            const syncId = `v35-chart-${selectedMarket.market_slug}`;
+            
+            return (
+              <div className="space-y-4">
+                {/* Market Price Chart - shows price movement relative to strike */}
+                <V35MarketPriceChart
+                  asset={selectedMarket.asset}
+                  marketSlug={selectedMarket.market_slug}
+                  startTs={startTs}
+                  endTs={endTs}
+                />
+                
+                {/* Fills Chart - shows orders and fills timeline */}
+                <V35FillsChart
+                  marketSlug={selectedMarket.market_slug}
+                  startTs={startTs}
+                  endTs={endTs}
+                  syncId={syncId}
+                />
+                
+                {/* Imbalance Chart - shows position buildup */}
+                {inventoryLoading ? (
+                  <div className="py-8 text-center text-muted-foreground">Loading position timeline...</div>
+                ) : inventorySnapshots && inventorySnapshots.length > 0 ? (
+                  <V35ImbalanceChart
+                    inventorySnapshots={inventorySnapshots}
+                    marketSlug={selectedMarket.market_slug}
+                    winner={selectedMarket.predicted_winning_side as 'UP' | 'DOWN' | undefined}
+                    groundTruth={{
+                      api_up_qty: selectedMarket.api_up_qty,
+                      api_down_qty: selectedMarket.api_down_qty,
+                      total_cost: selectedMarket.total_cost || 0,
+                      predicted_pnl: selectedMarket.predicted_pnl || 0,
+                    }}
+                  />
+                ) : (
+                  <div className="py-8 text-center text-muted-foreground">
+                    No inventory snapshots found for this market
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           
           {/* Quick stats for selected market - THESE ARE THE CORRECT VALUES FROM POLYMARKET API */}
           {selectedMarket && (() => {
