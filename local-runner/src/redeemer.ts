@@ -529,8 +529,23 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
 //   POST /redeem - Gasless redemption via Polymarket infrastructure
 // ============================================================================
 
-// Official Polymarket Relayer V2 API
-const RELAYER_BASE_URL = 'https://relayer-v2.polymarket.com';
+// Relayer endpoints have changed over time; we try a small set of known hosts/paths.
+// This keeps Magic/Email wallet redemptions working even if the API is versioned
+// behind different route prefixes.
+const RELAYER_BASE_URLS = [
+  'https://relayer-v2.polymarket.com',
+  'https://relayer.polymarket.com',
+] as const;
+
+const RELAYER_REDEEM_PATHS = [
+  '/redeem',
+  '/v2/redeem',
+  '/api/v2/redeem',
+  '/v1/redeem',
+  '/api/redeem',
+  '/redeem-positions',
+  '/v2/redeem-positions',
+] as const;
 
 interface RelayerRedeemRequest {
   conditionId: string;
@@ -562,7 +577,6 @@ async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimR
   }
 
   try {
-    const requestPath = '/redeem';
     const method = 'POST';
     const body = JSON.stringify({ conditionId });
     
@@ -571,135 +585,166 @@ async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimR
       sanitizeBase64Secret(config.polymarket.builderApiSecret!),
       'base64'
     );
-    const signature = buildRelayerSignature(secretBytes, timestamp, method, requestPath, body);
-    
-    // V35.17.0: Official Relayer V2 header format (underscores, not hyphens)
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'POLY_ADDRESS': config.polymarket.address || wallet?.address || '',
-      'POLY_SIGNATURE': signature,
-      'POLY_TIMESTAMP': timestamp,
-      'POLY_API_KEY': config.polymarket.builderApiKey!,
-      'POLY_PASSPHRASE': config.polymarket.builderPassphrase!,
-    };
+    let lastFailure: ClaimResult | null = null;
 
-    console.log(`   📡 POST ${RELAYER_BASE_URL}${requestPath}`);
-    
-    const response = await fetch(`${RELAYER_BASE_URL}${requestPath}`, {
-      method,
-      headers,
-      body,
-    });
+    for (const baseUrl of RELAYER_BASE_URLS) {
+      for (const requestPath of RELAYER_REDEEM_PATHS) {
+        const signature = buildRelayerSignature(secretBytes, timestamp, method, requestPath, body);
 
-    const responseText = await response.text();
-    console.log(`   📥 Response: HTTP ${response.status}`);
-    
-    if (!response.ok) {
-      // Check for specific error codes
-      if (response.status === 404) {
-        console.log(`   ⚠️ Relayer endpoint not found (404) - may be deprecated`);
-        return {
-          success: false,
-          error: `Relayer HTTP 404: endpoint may be deprecated`,
-          retryable: false,
-          errorCode: 'RELAYER_404',
+        // V35.17.0: Official Relayer header format (underscores)
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'POLY_ADDRESS': config.polymarket.address || wallet?.address || '',
+          'POLY_SIGNATURE': signature,
+          'POLY_TIMESTAMP': timestamp,
+          'POLY_API_KEY': config.polymarket.builderApiKey!,
+          'POLY_PASSPHRASE': config.polymarket.builderPassphrase!,
         };
-      }
-      
-      if (response.status === 403 || response.status === 401) {
-        console.log(`   ⚠️ Relayer auth failed - check Builder API credentials`);
-        return {
-          success: false,
-          error: `Relayer auth error (HTTP ${response.status})`,
-          retryable: false,
-          errorCode: 'RELAYER_AUTH',
-        };
-      }
 
-      return {
-        success: false,
-        error: `Relayer HTTP ${response.status}: ${responseText.slice(0, 200)}`,
-        retryable: response.status >= 500,
-        errorCode: `RELAYER_${response.status}`,
-      };
-    }
+        const url = `${baseUrl}${requestPath}`;
+        console.log(`   📡 POST ${url}`);
 
-    let data: RelayerRedeemResponse;
-    try {
-      data = JSON.parse(responseText);
-    } catch {
-      return {
-        success: false,
-        error: 'Invalid JSON response from Relayer',
-        retryable: true,
-        errorCode: 'RELAYER_BAD_JSON',
-      };
-    }
+        let response: any;
+        let responseText = '';
+        try {
+          response = await fetch(url, { method, headers, body });
+          responseText = await response.text();
+        } catch (netErr: any) {
+          const msg = netErr?.message || String(netErr);
+          console.log(`   ⚠️ Relayer network error for ${url}: ${msg}`);
+          lastFailure = {
+            success: false,
+            error: msg,
+            retryable: true,
+            errorCode: 'RELAYER_NETWORK',
+          };
+          continue;
+        }
 
-    const txHash = data.transactionHash || data.txHash;
-    
-    if (txHash) {
-      console.log(`   ✅ Relayer submitted tx: ${txHash}`);
-      console.log(`   🔗 https://polygonscan.com/tx/${txHash}`);
-      
-      // Wait for confirmation
-      const provider = getProvider();
-      try {
-        console.log(`   ⏳ Waiting for confirmation...`);
-        const receipt = await waitForTransaction(provider, txHash, 60000);
-        
-        if (receipt && receipt.status === 1) {
-          const events = parsePayoutRedemptionEvents(receipt);
-          const totalPayout = events.length > 0 
-            ? events.reduce((sum: number, e: PayoutRedemptionEvent) => sum + e.payoutUSDC, 0)
-            : position.currentValue || 0;
-          
-          console.log(`   ✅ CONFIRMED: claimed $${totalPayout.toFixed(2)}`);
-          
-          confirmedClaims.set(conditionId, {
-            txHash,
-            blockNumber: receipt.blockNumber,
-            payoutUSDC: totalPayout,
-            confirmedAt: Date.now(),
-          });
-          
+        console.log(`   📥 Response: HTTP ${response.status}`);
+
+        if (!response.ok) {
+          // Common routing/versioning differences: keep trying other paths/hosts.
+          if (response.status === 404 || response.status === 405) {
+            console.log(`   ⚠️ Relayer route not available (HTTP ${response.status}) on ${requestPath} - trying next...`);
+            lastFailure = {
+              success: false,
+              error: `Relayer route not available (HTTP ${response.status})` ,
+              retryable: false,
+              errorCode: 'RELAYER_ROUTE',
+            };
+            continue;
+          }
+
+          // Auth errors are definitive (won't change per-path)
+          if (response.status === 403 || response.status === 401) {
+            console.log(`   ⚠️ Relayer auth failed - check Builder API credentials`);
+            return {
+              success: false,
+              error: `Relayer auth error (HTTP ${response.status})`,
+              retryable: false,
+              errorCode: 'RELAYER_AUTH',
+            };
+          }
+
+          // Other errors: record and try other routes, but mark retryable for 5xx.
+          lastFailure = {
+            success: false,
+            error: `Relayer HTTP ${response.status}: ${responseText.slice(0, 200)}`,
+            retryable: response.status >= 500,
+            errorCode: `RELAYER_${response.status}`,
+          };
+          continue;
+        }
+
+        let data: RelayerRedeemResponse;
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          lastFailure = {
+            success: false,
+            error: 'Invalid JSON response from Relayer',
+            retryable: true,
+            errorCode: 'RELAYER_BAD_JSON',
+          };
+          continue;
+        }
+
+        const txHash = data.transactionHash || data.txHash;
+
+        if (txHash) {
+          console.log(`   ✅ Relayer submitted tx: ${txHash}`);
+          console.log(`   🔗 https://polygonscan.com/tx/${txHash}`);
+
+          // Wait for confirmation
+          const provider = getProvider();
+          try {
+            console.log(`   ⏳ Waiting for confirmation...`);
+            const receipt = await waitForTransaction(provider, txHash, 60000);
+
+            if (receipt && receipt.status === 1) {
+              const events = parsePayoutRedemptionEvents(receipt);
+              const totalPayout = events.length > 0
+                ? events.reduce((sum: number, e: PayoutRedemptionEvent) => sum + e.payoutUSDC, 0)
+                : position.currentValue || 0;
+
+              console.log(`   ✅ CONFIRMED: claimed $${totalPayout.toFixed(2)}`);
+
+              confirmedClaims.set(conditionId, {
+                txHash,
+                blockNumber: receipt.blockNumber,
+                payoutUSDC: totalPayout,
+                confirmedAt: Date.now(),
+              });
+
+              return {
+                success: true,
+                txHash,
+                blockNumber: receipt.blockNumber,
+                usdcReceived: totalPayout,
+              };
+            }
+          } catch (waitErr: any) {
+            console.log(`   ⚠️ Could not confirm tx: ${waitErr.message}`);
+            // Still return success since relayer accepted it
+            return {
+              success: true,
+              txHash,
+              usdcReceived: position.currentValue || 0,
+            };
+          }
+        }
+
+        // Check for success without txHash (already claimed, etc)
+        if (data.success === true) {
+          console.log(`   ✅ Relayer reports success (no tx needed - may already be claimed)`);
           return {
             success: true,
-            txHash,
-            blockNumber: receipt.blockNumber,
-            usdcReceived: totalPayout,
+            usdcReceived: 0,
           };
         }
-      } catch (waitErr: any) {
-        console.log(`   ⚠️ Could not confirm tx: ${waitErr.message}`);
-        // Still return success since relayer accepted it
-        return {
-          success: true,
-          txHash,
-          usdcReceived: position.currentValue || 0,
+
+        // Error response
+        const errorMsg = data.error || data.message || 'Unknown relayer error';
+        console.log(`   ❌ Relayer error: ${errorMsg}`);
+
+        lastFailure = {
+          success: false,
+          error: errorMsg,
+          retryable: true,
+          errorCode: 'RELAYER_ERROR',
         };
       }
     }
 
-    // Check for success without txHash (already claimed, etc)
-    if (data.success === true) {
-      console.log(`   ✅ Relayer reports success (no tx needed - may already be claimed)`);
-      return {
-        success: true,
-        usdcReceived: 0,
-      };
-    }
-
-    // Error response
-    const errorMsg = data.error || data.message || 'Unknown relayer error';
-    console.log(`   ❌ Relayer error: ${errorMsg}`);
-    
-    return {
-      success: false,
-      error: errorMsg,
-      retryable: true,
-      errorCode: 'RELAYER_ERROR',
-    };
+    return (
+      lastFailure ?? {
+        success: false,
+        error: 'Relayer redemption failed: no reachable endpoint matched',
+        retryable: true,
+        errorCode: 'RELAYER_NO_ENDPOINT',
+      }
+    );
 
   } catch (error: any) {
     const msg = error.message || String(error);
@@ -1056,8 +1101,13 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
         return relayerResult;
       }
       
-      // If Relayer failed with non-404, report the error
-      if (relayerResult.errorCode !== 'RELAYER_404' && relayerResult.errorCode !== 'RELAYER_NETWORK') {
+      // If Relayer failed with a definitive error, report it; otherwise allow fallbacks.
+      if (
+        relayerResult.errorCode !== 'RELAYER_404' &&
+        relayerResult.errorCode !== 'RELAYER_NETWORK' &&
+        relayerResult.errorCode !== 'RELAYER_ROUTE' &&
+        relayerResult.errorCode !== 'RELAYER_NO_ENDPOINT'
+      ) {
         return relayerResult;
       }
       
