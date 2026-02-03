@@ -18,7 +18,7 @@
  * - Safety guardrails (no double claims, min threshold, retry logic)
  * - Event-based confirmation (PayoutRedemption events)
  * 
- * @version 3.0.0 - Added Relayer API support for Magic wallets
+ * @version 4.0.0 - V35.16.0: Relayer API as primary path for Magic/Email wallets
  */
 
 import pkg from 'ethers';
@@ -517,9 +517,204 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
 }
 
 // ============================================================================
-// REDEEM: Magic/Email Proxy Wallet (via execute() method)
-// The signer can call the proxy wallet's execute() to redeem positions on-chain.
-// This replaces the deprecated Relayer API.
+// RELAYER API REDEMPTION (for Magic/Email wallets)
+// 
+// For Magic/Email wallets, the exported private key CANNOT call proxy.proxy()
+// directly. Only Polymarket's backend (via Relayer API) can sign these txs.
+// 
+// Endpoints:
+//   POST /redeem - Gasless redemption via Polymarket infrastructure
+// ============================================================================
+
+const RELAYER_BASE_URL = 'https://clob.polymarket.com';
+
+interface RelayerRedeemRequest {
+  conditionId: string;
+  indexSet?: number[];
+}
+
+interface RelayerRedeemResponse {
+  success?: boolean;
+  transactionHash?: string;
+  txHash?: string;
+  error?: string;
+  message?: string;
+}
+
+async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimResult> {
+  const conditionId = position.conditionId;
+  
+  console.log(`   🌐 V35.16.0: Attempting Relayer API redemption (gasless)`);
+  console.log(`   📍 Condition ID: ${conditionId}`);
+  
+  if (!hasBuilderCredentials()) {
+    console.log(`   ❌ No Builder API credentials - cannot use Relayer`);
+    return {
+      success: false,
+      error: 'No Builder API credentials configured',
+      retryable: false,
+      errorCode: 'NO_BUILDER_CREDS',
+    };
+  }
+
+  try {
+    const requestPath = '/redeem';
+    const method = 'POST';
+    const body = JSON.stringify({ conditionId });
+    
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const secretBytes = Buffer.from(
+      sanitizeBase64Secret(config.polymarket.builderApiSecret!),
+      'base64'
+    );
+    const signature = buildRelayerSignature(secretBytes, timestamp, method, requestPath, body);
+    
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'POLY-ADDRESS': config.polymarket.address || wallet?.address || '',
+      'POLY-SIGNATURE': signature,
+      'POLY-TIMESTAMP': timestamp,
+      'POLY-API-KEY': config.polymarket.builderApiKey!,
+      'POLY-PASSPHRASE': config.polymarket.builderPassphrase!,
+    };
+
+    console.log(`   📡 POST ${RELAYER_BASE_URL}${requestPath}`);
+    
+    const response = await fetch(`${RELAYER_BASE_URL}${requestPath}`, {
+      method,
+      headers,
+      body,
+    });
+
+    const responseText = await response.text();
+    console.log(`   📥 Response: HTTP ${response.status}`);
+    
+    if (!response.ok) {
+      // Check for specific error codes
+      if (response.status === 404) {
+        console.log(`   ⚠️ Relayer endpoint not found (404) - may be deprecated`);
+        return {
+          success: false,
+          error: `Relayer HTTP 404: endpoint may be deprecated`,
+          retryable: false,
+          errorCode: 'RELAYER_404',
+        };
+      }
+      
+      if (response.status === 403 || response.status === 401) {
+        console.log(`   ⚠️ Relayer auth failed - check Builder API credentials`);
+        return {
+          success: false,
+          error: `Relayer auth error (HTTP ${response.status})`,
+          retryable: false,
+          errorCode: 'RELAYER_AUTH',
+        };
+      }
+
+      return {
+        success: false,
+        error: `Relayer HTTP ${response.status}: ${responseText.slice(0, 200)}`,
+        retryable: response.status >= 500,
+        errorCode: `RELAYER_${response.status}`,
+      };
+    }
+
+    let data: RelayerRedeemResponse;
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      return {
+        success: false,
+        error: 'Invalid JSON response from Relayer',
+        retryable: true,
+        errorCode: 'RELAYER_BAD_JSON',
+      };
+    }
+
+    const txHash = data.transactionHash || data.txHash;
+    
+    if (txHash) {
+      console.log(`   ✅ Relayer submitted tx: ${txHash}`);
+      console.log(`   🔗 https://polygonscan.com/tx/${txHash}`);
+      
+      // Wait for confirmation
+      const provider = getProvider();
+      try {
+        console.log(`   ⏳ Waiting for confirmation...`);
+        const receipt = await waitForTransaction(provider, txHash, 60000);
+        
+        if (receipt && receipt.status === 1) {
+          const events = parsePayoutRedemptionEvents(receipt);
+          const totalPayout = events.length > 0 
+            ? events.reduce((sum: number, e: PayoutRedemptionEvent) => sum + e.payoutUSDC, 0)
+            : position.currentValue || 0;
+          
+          console.log(`   ✅ CONFIRMED: claimed $${totalPayout.toFixed(2)}`);
+          
+          confirmedClaims.set(conditionId, {
+            txHash,
+            blockNumber: receipt.blockNumber,
+            payoutUSDC: totalPayout,
+            confirmedAt: Date.now(),
+          });
+          
+          return {
+            success: true,
+            txHash,
+            blockNumber: receipt.blockNumber,
+            usdcReceived: totalPayout,
+          };
+        }
+      } catch (waitErr: any) {
+        console.log(`   ⚠️ Could not confirm tx: ${waitErr.message}`);
+        // Still return success since relayer accepted it
+        return {
+          success: true,
+          txHash,
+          usdcReceived: position.currentValue || 0,
+        };
+      }
+    }
+
+    // Check for success without txHash (already claimed, etc)
+    if (data.success === true) {
+      console.log(`   ✅ Relayer reports success (no tx needed - may already be claimed)`);
+      return {
+        success: true,
+        usdcReceived: 0,
+      };
+    }
+
+    // Error response
+    const errorMsg = data.error || data.message || 'Unknown relayer error';
+    console.log(`   ❌ Relayer error: ${errorMsg}`);
+    
+    return {
+      success: false,
+      error: errorMsg,
+      retryable: true,
+      errorCode: 'RELAYER_ERROR',
+    };
+
+  } catch (error: any) {
+    const msg = error.message || String(error);
+    console.error(`   ❌ Relayer request failed: ${msg}`);
+    
+    // Network errors are retryable
+    const isNetworkError = msg.includes('fetch') || msg.includes('ENOTFOUND') || 
+                          msg.includes('ETIMEDOUT') || msg.includes('network');
+    
+    return {
+      success: false,
+      error: msg,
+      retryable: isNetworkError,
+      errorCode: 'RELAYER_NETWORK',
+    };
+  }
+}
+
+// ============================================================================
+// INDEX SETS HELPER
 // ============================================================================
 
 async function buildIndexSetsForCondition(conditionId: string, provider: any): Promise<number[]> {
@@ -684,13 +879,13 @@ async function redeemDirectCTF(position: RedeemablePosition): Promise<ClaimResul
 }
 
 /**
- * V35.15.0: Fixed redemption for Magic/Email wallets
+ * V35.16.0: Fallback proxy redemption (may not work for Magic/Email wallets)
  * 
- * Uses proxy.proxy(CTF_ADDRESS, redeemCalldata) to make the PROXY the msg.sender
- * This way the CTF contract sees the proxy as the caller, burns its tokens,
- * and sends USDC to the proxy wallet.
+ * For Magic wallets, the exported signer is typically NOT authorized to call
+ * proxy.proxy() directly. This method is a fallback that may work for some
+ * wallet configurations but will fail for most Magic/Email setups.
  * 
- * The key insight: we call proxy.proxy() NOT proxy.execute()
+ * Primary path for Magic wallets is redeemViaRelayerAPI().
  */
 async function redeemViaMagicProxy(position: RedeemablePosition): Promise<ClaimResult> {
   const conditionId = position.conditionId;
@@ -698,7 +893,8 @@ async function redeemViaMagicProxy(position: RedeemablePosition): Promise<ClaimR
   const provider = getProvider();
   const proxyAddress = config.polymarket.address;
 
-  console.log(`   🔧 V35.15.0: Proxy redemption via proxy.proxy()`);
+  console.log(`   🔧 V35.16.0: Proxy fallback via proxy.proxy()`);
+  console.log(`   ⚠️ Note: May fail for Magic wallets (signer not authorized)`);
   console.log(`   📍 Proxy wallet: ${proxyAddress}`);
   console.log(`   📍 Signer: ${wallet?.address}`);
 
@@ -815,13 +1011,14 @@ async function redeemViaMagicProxy(position: RedeemablePosition): Promise<ClaimR
 }
 
 // ============================================================================
-// REDEEM: V35.15.0 - Correct routing based on wallet type
+// REDEEM: V35.16.0 - Correct routing based on wallet type
 // 
-// For Magic/Email wallets (proxy mode):
-//   Use proxy.proxy(CTF, calldata) to make the proxy the msg.sender
+// Priority order for Magic/Email wallets (proxy mode):
+//   1. Relayer API (gasless, works for all Magic wallets)
+//   2. Direct CTF if position is in signer wallet
 // 
 // For EOA wallets (no proxy):
-//   Call CTF.redeemPositions() directly (tokens must be in signer wallet)
+//   Direct CTF.redeemPositions() call
 // ============================================================================
 
 async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResult> {
@@ -829,30 +1026,59 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
   const signerWallet = (wallet?.address || '').toLowerCase();
   const configProxy = (config.polymarket.address || '').toLowerCase();
   
-  console.log(`   🔧 V35.15.0: Determining redemption path`);
+  console.log(`   🔧 V35.16.0: Determining redemption path`);
   console.log(`   📍 Position held by: ${positionWallet.slice(0, 10)}...`);
   console.log(`   📍 Signer wallet: ${signerWallet.slice(0, 10)}...`);
   console.log(`   📍 Config proxy: ${configProxy.slice(0, 10) || 'not set'}...`);
 
-  // V35.15.0: Route based on whether we have a proxy configured
-  // If position is held by proxy, we MUST use proxy.proxy() method
-  if (configProxy && positionWallet === configProxy) {
-    console.log(`   🎯 Position in PROXY wallet → using proxy.proxy() method`);
-    return redeemViaMagicProxy(position);
-  }
-  
-  // Position is in signer wallet - direct CTF call works
+  // V35.16.0: Position in signer wallet - direct CTF call works
   if (positionWallet === signerWallet) {
     console.log(`   🎯 Position in SIGNER wallet → using direct CTF call`);
     return redeemDirectCTF(position);
   }
 
-  // Position in unknown wallet - try proxy if configured
-  if (configProxy) {
-    console.log(`   ⚠️ Position wallet unknown, trying proxy method`);
-    return redeemViaMagicProxy(position);
+  // Position in proxy wallet - MUST use Relayer API
+  // Direct proxy.proxy() doesn't work for Magic wallets (signer not authorized)
+  if (configProxy && positionWallet === configProxy) {
+    console.log(`   🎯 Position in PROXY wallet → trying Relayer API first`);
+    
+    // Try Relayer API (gasless)
+    if (hasBuilderCredentials()) {
+      const relayerResult = await redeemViaRelayerAPI(position);
+      
+      // If Relayer works, great!
+      if (relayerResult.success) {
+        return relayerResult;
+      }
+      
+      // If Relayer failed with non-404, report the error
+      if (relayerResult.errorCode !== 'RELAYER_404' && relayerResult.errorCode !== 'RELAYER_NETWORK') {
+        return relayerResult;
+      }
+      
+      // Relayer unavailable - try fallback approaches
+      console.log(`   ⚠️ Relayer unavailable, trying proxy.proxy() fallback...`);
+    }
+    
+    // Fallback: try proxy.proxy() (may fail for Magic wallets)
+    const proxyResult = await redeemViaMagicProxy(position);
+    if (proxyResult.success) {
+      return proxyResult;
+    }
+    
+    // Both failed - provide clear error message
+    console.log(`   ❌ All redemption methods failed for proxy wallet`);
+    console.log(`   💡 For Magic/Email wallets, manual claim at polymarket.com/portfolio may be required`);
+    
+    return {
+      success: false,
+      error: 'Proxy wallet redemption failed - Relayer unavailable and proxy.proxy() unauthorized. Manual claim required.',
+      retryable: false,
+      errorCode: 'PROXY_NO_PATH',
+    };
   }
 
+  // Position in unknown wallet
   console.log(`   ❌ No redemption path available`);
   return {
     success: false,

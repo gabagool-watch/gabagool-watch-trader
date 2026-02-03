@@ -120,44 +120,68 @@ claim_usdc NUMERIC
 | `wrong_wallet` | 👤 | Position belongs to different wallet | Cannot claim with current signer |
 | `not_claimed` | ❌ | Never claimed on-chain | Bot should claim this |
 
-## Proxy Wallet Mode
+## Wallet Types & Redemption Paths (V35.16.0)
 
-### V35.12.2 Update: Fixed Proxy Wallet Claiming
+### EOA Wallets (Direct)
+When `POLYMARKET_ADDRESS` equals the signer wallet or is not set:
+- Direct `CTF.redeemPositions()` calls
+- Signer pays gas (MATIC)
+- Works immediately
 
-Previous versions had a bug where `redeemPositions` was called directly from the signer wallet, resulting in `payout=0` because the signer doesn't hold any tokens (the proxy wallet does).
+### Magic/Email Wallets (Proxy Mode)
+When `POLYMARKET_ADDRESS` differs from signer AND `POLYMARKET_SIGNATURE_TYPE=1`:
 
-**The fix (V35.12.2):**
-- When `POLYMARKET_ADDRESS` (proxy) differs from the signer, we now ALWAYS use the proxy path
-- We call `proxyWallet.execute(CTF, redeemPositions(...))` which makes the proxy wallet the `msg.sender` in the CTF contract
-- This ensures the CTF contract sees the correct token holder and pays out correctly
+**V35.16.0 Flow:**
+1. **Relayer API (Primary)** - Gasless redemption via Polymarket backend
+   - Requires Builder API credentials (`POLY_BUILDER_*`)
+   - No gas required from signer
+   - May fail if Relayer is down or deprecated
 
-**Wallet architecture (Magic/Email accounts):**
+2. **proxy.proxy() Fallback** - Direct on-chain via proxy
+   - ⚠️ Usually FAILS for Magic wallets (signer not authorized)
+   - Only works if signer controls the proxy
+
+3. **Manual Claim** - If both fail
+   - Go to https://polymarket.com/portfolio
+   - Connect wallet and click "Claim"
+
+**Important:** For Magic/Email accounts, the exported private key is ONLY for L2 order signing, NOT for direct on-chain proxy control. The Relayer API is the only reliable automated path.
+
+### Browser Wallets (Gnosis Safe)
+When `POLYMARKET_SIGNATURE_TYPE=2`:
+- Uses `safe.execTransaction()` 
+- Signer must be a Safe owner
+
+## Configuration
+
+### Required Environment Variables
+```bash
+# Wallet
+POLYMARKET_PRIVATE_KEY=0x...          # Signer private key
+POLYMARKET_ADDRESS=0x...              # Proxy wallet address (if different from signer)
+POLYMARKET_SIGNATURE_TYPE=1           # 0=EOA, 1=Magic/Email, 2=Safe
+
+# Builder API (required for Magic wallets)
+POLY_BUILDER_API_KEY=your_key
+POLY_BUILDER_API_SECRET=your_secret
+POLY_BUILDER_PASSPHRASE=your_passphrase
+
+# USDC Contract
+POLYMARKET_USDC_ADDRESS=0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359
 ```
-Signer (EOA) ─────► Proxy Wallet ─────► CTF Contract
-    │                    │                   │
-    │ calls execute()    │ becomes msg.sender│ redeems tokens → payout > 0
-    │ pays gas           │ holds tokens      │
-    └────────────────────┴───────────────────┘
-```
-
-**For Browser wallets (MetaMask, etc.):**
-- These use Gnosis Safe architecture
-- We call `safe.execTransaction(...)` directly on the Safe contract
-- The signer must be an owner of the Safe
-
-**If claims still fail:**
-1. Verify `POLYMARKET_ADDRESS` matches your proxy wallet address (visible in Polymarket UI)
-2. Ensure the signer wallet has MATIC for gas (~0.05 MATIC per claim)
-3. Check that the signer is the owner of the proxy (should be automatic for Magic exports)
-4. Set `POLYMARKET_SIGNATURE_TYPE=1` for Magic/Email or `=2` for Safe/Browser wallets
-5. Run `docker exec -it trading-bot npm run claim:debug` to diagnose issues
-
-**Manual claiming (fallback):**
-1. Go to https://polymarket.com/portfolio
-2. Connect your wallet (same one used to trade)
-3. Click "Claim" on each resolved market
 
 ## Troubleshooting
+
+### "Relayer HTTP 404"
+The Relayer API endpoint may be deprecated or temporarily unavailable.
+- The system will fall back to `proxy.proxy()` (may fail)
+- If all methods fail, manual claim is required
+
+### "execution reverted" on proxy.proxy()
+This means the signer is NOT authorized to call `proxy()` on the proxy wallet.
+- This is expected for Magic/Email wallets
+- The Relayer API is the correct path for these wallets
+- If Relayer is down, manual claim at polymarket.com is required
 
 ### "Nothing to claim"
 - All positions below minimum threshold ($0.10)
@@ -165,7 +189,7 @@ Signer (EOA) ─────► Proxy Wallet ─────► CTF Contract
 - No resolved markets with winning outcomes
 
 ### "Position wallet doesn't match signer or config proxy"
-This means the position is held by a different wallet than expected:
+The position is held by a different wallet than configured:
 1. Check your POLYMARKET_ADDRESS env variable
 2. It should match the wallet shown in the API response
 3. Update your config and restart
@@ -176,33 +200,17 @@ The system uses a mutex to prevent parallel claim attempts. If you see nonce err
 ### RPC errors
 The system automatically rotates between multiple RPC endpoints on failure with rate limit handling.
 
-### "Transaction reverted on-chain" (or "No PayoutRedemption events")
-This most commonly happens when the wrong collateral token address is used for `redeemPositions()`.
-
-Polymarket has used both **USDC.e (bridged)** and **native USDC** on Polygon over time.
-Set the collateral explicitly in your env file and restart:
-
-```bash
-# USDC.e (bridged) on Polygon
-POLYMARKET_USDC_ADDRESS=0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
-
-# Native USDC on Polygon (if Polymarket migrated)
-POLYMARKET_USDC_ADDRESS=0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359
-```
+### "INSUFFICIENT_FUNDS"
+The signer wallet needs MATIC for gas:
+1. Check balance: `cast balance 0x6E848Dcf... --rpc-url https://polygon-rpc.com`
+2. Send 0.02-0.05 MATIC to the signer address
+3. Retry claim
 
 ### Magic/Email wallet claims failing
-For Magic Link (email) accounts, the proxy wallet is managed by Polymarket's backend, 
-not your signer. You **must** use the Relayer API for gasless redemptions.
-
-**Solution:** Configure Builder API credentials:
-```bash
-POLY_BUILDER_API_KEY=your_builder_key
-POLY_BUILDER_API_SECRET=your_builder_secret
-POLY_BUILDER_PASSPHRASE=your_builder_passphrase
-POLYMARKET_SIGNATURE_TYPE=1
-```
-
-Get Builder credentials from the [Polymarket Builder Program](https://docs.polymarket.com/#builder-api).
+For Magic Link (email) accounts:
+1. Configure Builder API credentials (required for Relayer API)
+2. If Relayer fails, manual claim at https://polymarket.com/portfolio
+3. Direct `proxy.proxy()` will NOT work (signer unauthorized)
 
 ### Claims stuck as "pending"
 Run `npm run claim:debug` to see on-chain status vs API status. Indexer delays of 5-10 minutes are normal.
