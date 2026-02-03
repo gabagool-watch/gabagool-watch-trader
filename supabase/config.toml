@@ -89,3 +89,6 @@ verify_jwt = false
 
 [functions.gabagool-grid-backtest]
 verify_jwt = false
+
+[functions.v35-analysis-export]
+verify_jwt = false
