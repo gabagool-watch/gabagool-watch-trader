@@ -3,52 +3,60 @@ import { Button } from '@/components/ui/button';
 import { FileCode, Loader2 } from 'lucide-react';
 import JSZip from 'jszip';
 
-// V28 Strategy files - complete set for expert review
-const V28_STRATEGY_FILES = [
-  // V28 Core
-  { folder: 'v28', name: 'index.ts', path: 'local-runner/src/v28/index.ts' },
-  { folder: 'v28', name: 'runner.ts', path: 'local-runner/src/v28/runner.ts' },
-  { folder: 'v28', name: 'config.ts', path: 'local-runner/src/v28/config.ts' },
-  { folder: 'v28', name: 'pre-signed-orders.ts', path: 'local-runner/src/v28/pre-signed-orders.ts' },
+// V35 Strategy files - complete set for expert review
+const V35_STRATEGY_FILES = [
+  // V35 Core
+  { folder: 'v35', name: 'index.ts', path: 'local-runner/src/v35/index.ts' },
+  { folder: 'v35', name: 'runner.ts', path: 'local-runner/src/v35/runner.ts' },
+  { folder: 'v35', name: 'config.ts', path: 'local-runner/src/v35/config.ts' },
+  { folder: 'v35', name: 'types.ts', path: 'local-runner/src/v35/types.ts' },
+  { folder: 'v35', name: 'utils.ts', path: 'local-runner/src/v35/utils.ts' },
   
-  // V27 Delta Mispricing Strategy
-  { folder: 'v27', name: 'index.ts', path: 'local-runner/src/v27/index.ts' },
-  { folder: 'v27', name: 'config.ts', path: 'local-runner/src/v27/config.ts' },
-  { folder: 'v27', name: 'runner.ts', path: 'local-runner/src/v27/runner.ts' },
-  { folder: 'v27', name: 'shadow-runner.ts', path: 'local-runner/src/v27/shadow-runner.ts' },
-  { folder: 'v27', name: 'mispricing-detector.ts', path: 'local-runner/src/v27/mispricing-detector.ts' },
-  { folder: 'v27', name: 'entry-manager.ts', path: 'local-runner/src/v27/entry-manager.ts' },
-  { folder: 'v27', name: 'correction-monitor.ts', path: 'local-runner/src/v27/correction-monitor.ts' },
-  { folder: 'v27', name: 'hedge-manager.ts', path: 'local-runner/src/v27/hedge-manager.ts' },
-  { folder: 'v27', name: 'adverse-selection-filter.ts', path: 'local-runner/src/v27/adverse-selection-filter.ts' },
-  { folder: 'v27', name: 'cadence-controller.ts', path: 'local-runner/src/v27/cadence-controller.ts' },
-  { folder: 'v27', name: 'shadow-engine.ts', path: 'local-runner/src/v27/shadow-engine.ts' },
-  { folder: 'v27', name: 'shadow-position-manager.ts', path: 'local-runner/src/v27/shadow-position-manager.ts' },
-  { folder: 'v27', name: 'logger.ts', path: 'local-runner/src/v27/logger.ts' },
+  // V35 Market & Pricing
+  { folder: 'v35', name: 'market-discovery.ts', path: 'local-runner/src/v35/market-discovery.ts' },
+  { folder: 'v35', name: 'market-pricing.ts', path: 'local-runner/src/v35/market-pricing.ts' },
+  { folder: 'v35', name: 'quoting-engine.ts', path: 'local-runner/src/v35/quoting-engine.ts' },
+  { folder: 'v35', name: 'v36-quoting-engine.ts', path: 'local-runner/src/v35/v36-quoting-engine.ts' },
   
-  // Price feeds & WebSocket
-  { folder: 'core', name: 'price-feed-ws-logger.ts', path: 'local-runner/src/price-feed-ws-logger.ts' },
-  { folder: 'core', name: 'polymarket.ts', path: 'local-runner/src/polymarket.ts' },
+  // V35 Order & Position Management
+  { folder: 'v35', name: 'order-manager.ts', path: 'local-runner/src/v35/order-manager.ts' },
+  { folder: 'v35', name: 'hedge-manager.ts', path: 'local-runner/src/v35/hedge-manager.ts' },
+  { folder: 'v35', name: 'pair-tracker.ts', path: 'local-runner/src/v35/pair-tracker.ts' },
+  { folder: 'v35', name: 'fill-tracker.ts', path: 'local-runner/src/v35/fill-tracker.ts' },
+  { folder: 'v35', name: 'fill-sync-tracker.ts', path: 'local-runner/src/v35/fill-sync-tracker.ts' },
   
-  // Order management & rate limiting
-  { folder: 'core', name: 'order-rate-limiter.ts', path: 'local-runner/src/order-rate-limiter.ts' },
-  { folder: 'core', name: 'burst-limiter.ts', path: 'local-runner/src/burst-limiter.ts' },
+  // V35 Risk & Safety
+  { folder: 'v35', name: 'circuit-breaker.ts', path: 'local-runner/src/v35/circuit-breaker.ts' },
+  { folder: 'v35', name: 'reversal-detector.ts', path: 'local-runner/src/v35/reversal-detector.ts' },
+  { folder: 'v35', name: 'proactive-rebalancer.ts', path: 'local-runner/src/v35/proactive-rebalancer.ts' },
+  { folder: 'v35', name: 'emergency-recovery.ts', path: 'local-runner/src/v35/emergency-recovery.ts' },
+  { folder: 'v35', name: 'expiry-snapshot.ts', path: 'local-runner/src/v35/expiry-snapshot.ts' },
   
-  // Hard invariants & risk
+  // V35 Data & Feeds
+  { folder: 'v35', name: 'backend.ts', path: 'local-runner/src/v35/backend.ts' },
+  { folder: 'v35', name: 'binance-feed.ts', path: 'local-runner/src/v35/binance-feed.ts' },
+  { folder: 'v35', name: 'combined-book.ts', path: 'local-runner/src/v35/combined-book.ts' },
+  { folder: 'v35', name: 'depth-parser.ts', path: 'local-runner/src/v35/depth-parser.ts' },
+  { folder: 'v35', name: 'user-ws.ts', path: 'local-runner/src/v35/user-ws.ts' },
+  
+  // Core shared modules
   { folder: 'core', name: 'hard-invariants.ts', path: 'local-runner/src/hard-invariants.ts' },
   { folder: 'core', name: 'inventory-risk.ts', path: 'local-runner/src/inventory-risk.ts' },
   { folder: 'core', name: 'price-guard.ts', path: 'local-runner/src/price-guard.ts' },
-  
-  // State management
-  { folder: 'core', name: 'market-state-manager.ts', path: 'local-runner/src/market-state-manager.ts' },
+  { folder: 'core', name: 'burst-limiter.ts', path: 'local-runner/src/burst-limiter.ts' },
+  { folder: 'core', name: 'order-rate-limiter.ts', path: 'local-runner/src/order-rate-limiter.ts' },
+  { folder: 'core', name: 'sell-policy.ts', path: 'local-runner/src/sell-policy.ts' },
+  { folder: 'core', name: 'hedge-priority.ts', path: 'local-runner/src/hedge-priority.ts' },
+  { folder: 'core', name: 'hedge-escalator.ts', path: 'local-runner/src/hedge-escalator.ts' },
+  { folder: 'core', name: 'exposure-ledger.ts', path: 'local-runner/src/exposure-ledger.ts' },
+  { folder: 'core', name: 'accounting-ledger.ts', path: 'local-runner/src/accounting-ledger.ts' },
   { folder: 'core', name: 'position-cache.ts', path: 'local-runner/src/position-cache.ts' },
   { folder: 'core', name: 'positions-sync.ts', path: 'local-runner/src/positions-sync.ts' },
-  
-  // Configuration
+  { folder: 'core', name: 'market-state-manager.ts', path: 'local-runner/src/market-state-manager.ts' },
+  { folder: 'core', name: 'market-mutex.ts', path: 'local-runner/src/market-mutex.ts' },
   { folder: 'core', name: 'config.ts', path: 'local-runner/src/config.ts' },
   { folder: 'core', name: 'resolved-config.ts', path: 'local-runner/src/resolved-config.ts' },
-  
-  // Infrastructure
+  { folder: 'core', name: 'polymarket.ts', path: 'local-runner/src/polymarket.ts' },
   { folder: 'core', name: 'backend.ts', path: 'local-runner/src/backend.ts' },
   { folder: 'core', name: 'authManager.ts', path: 'local-runner/src/authManager.ts' },
   { folder: 'core', name: 'chain.ts', path: 'local-runner/src/chain.ts' },
@@ -58,6 +66,9 @@ const V28_STRATEGY_FILES = [
   // Documentation
   { folder: 'docs', name: 'v8-strategy.md', path: 'local-runner/docs/v8-strategy.md' },
   { folder: 'docs', name: 'strategy-spec-v7-revC.md', path: 'local-runner/docs/strategy-spec-v7-revC.md' },
+  { folder: 'docs', name: 'revC4-hard-invariants-fix-request.txt', path: 'local-runner/docs/revC4-hard-invariants-fix-request.txt' },
+  { folder: 'docs', name: 'revC4.1-concurrency-burst-halt.txt', path: 'local-runner/docs/revC4.1-concurrency-burst-halt.txt' },
+  { folder: 'docs', name: 'revC4.2-pnl-accounting-sell-policy.txt', path: 'local-runner/docs/revC4.2-pnl-accounting-sell-policy.txt' },
 ];
 
 export function DownloadStrategyButton() {
@@ -70,19 +81,18 @@ export function DownloadStrategyButton() {
     
     try {
       const zip = new JSZip();
-      const rootFolder = zip.folder('polymarket-strategy-v28-review');
+      const rootFolder = zip.folder('polymarket-strategy-v35-review');
       
       if (!rootFolder) throw new Error('Failed to create zip folder');
 
       // Create subfolders
-      const v28Folder = rootFolder.folder('v28');
-      const v27Folder = rootFolder.folder('v27');
+      const v35Folder = rootFolder.folder('v35');
       const coreFolder = rootFolder.folder('core');
       const docsFolder = rootFolder.folder('docs');
 
       // Fetch all strategy files in parallel
       const fileContents = await Promise.all(
-        V28_STRATEGY_FILES.map(async (file) => {
+        V35_STRATEGY_FILES.map(async (file) => {
           try {
             const response = await fetch(`/${file.path}`, {
               headers: { 'Accept': 'text/plain' }
@@ -102,113 +112,138 @@ export function DownloadStrategyButton() {
 
       // Add files to appropriate folders
       for (const file of fileContents) {
-        const folder = file.folder === 'v28' ? v28Folder :
-                       file.folder === 'v27' ? v27Folder :
+        const folder = file.folder === 'v35' ? v35Folder :
                        file.folder === 'docs' ? docsFolder : coreFolder;
         folder?.file(file.name, file.content);
       }
 
       // Add comprehensive README for expert review
-      const readme = `# Polymarket Trading Strategy - Expert Review Package
+      const readme = `# Polymarket Trading Strategy V35 - Expert Review Package
 Generated: ${new Date().toISOString()}
 
 ## Overview
 
-This package contains the complete V27/V28 trading strategy for Polymarket 15-minute UP/DOWN markets.
-The strategy exploits delta mispricing between spot prices (Binance/Chainlink) and Polymarket prices.
+This package contains the complete V35 passive market-making strategy for Polymarket 15-minute UP/DOWN markets.
+The strategy provides liquidity on both sides and profits from the bid-ask spread while managing inventory risk.
 
 ## Architecture
 
-### V28 - Pre-Signed Order Strategy
-The main runner that uses pre-signed orders for fast execution:
-- \`v28/runner.ts\`: Main trading loop with market rotation
-- \`v28/pre-signed-orders.ts\`: Order pre-signing for reduced latency
-- \`v28/config.ts\`: V28-specific configuration
+### V35 - Passive Market Maker
+The main strategy that quotes on both sides of UP/DOWN markets:
 
-### V27 - Delta Mispricing Detection
-Core signal generation based on spot vs Polymarket delta:
-- \`v27/mispricing-detector.ts\`: Detects when Polymarket price diverges from expected fair value
-- \`v27/entry-manager.ts\`: Decides when to enter based on mispricing signals
-- \`v27/correction-monitor.ts\`: Monitors for price correction after entry
-- \`v27/hedge-manager.ts\`: Determines when and how to hedge positions
-- \`v27/adverse-selection-filter.ts\`: Filters out toxic flow (aggressive takers, book asymmetry)
-- \`v27/cadence-controller.ts\`: Adaptive evaluation frequency (COLD/WARM/HOT)
+**Core Engine:**
+- \`v35/runner.ts\`: Main trading loop with market rotation
+- \`v35/quoting-engine.ts\`: Calculates fair prices and generates quotes
+- \`v35/v36-quoting-engine.ts\`: Enhanced quoting with reversal detection
+- \`v35/config.ts\`: V35-specific configuration
+- \`v35/types.ts\`: TypeScript type definitions
 
-### Price Feed System
-- \`core/price-feed-ws-logger.ts\`: WebSocket connections to Binance and Polymarket CLOB
-- Real-time orderbook updates with <50ms latency target
-- Multi-source price aggregation (Binance, Chainlink, Polymarket)
+**Market & Pricing:**
+- \`v35/market-discovery.ts\`: Discovers active UP/DOWN markets
+- \`v35/market-pricing.ts\`: Fair value calculation based on spot vs strike
+- \`v35/binance-feed.ts\`: Real-time spot price feed from Binance
+- \`v35/combined-book.ts\`: Aggregated orderbook from multiple sources
+- \`v35/depth-parser.ts\`: Orderbook depth parsing and analysis
 
-### Order Execution
-- \`core/order-rate-limiter.ts\`: Rate limiting per market/token
-- \`core/burst-limiter.ts\`: Burst protection to avoid API blocks
-- \`core/polymarket.ts\`: CLOB API wrapper with price improvement
+**Position Management:**
+- \`v35/order-manager.ts\`: Order placement and lifecycle management
+- \`v35/hedge-manager.ts\`: Inventory hedging when positions become imbalanced
+- \`v35/pair-tracker.ts\`: Tracks paired UP+DOWN positions (locked profit)
+- \`v35/fill-tracker.ts\`: Tracks fills and updates positions
+- \`v35/fill-sync-tracker.ts\`: Syncs fills with database
 
-### Risk Management
+**Risk & Safety:**
+- \`v35/circuit-breaker.ts\`: Halts trading on anomalies
+- \`v35/reversal-detector.ts\`: Detects price reversals (crossing strike)
+- \`v35/proactive-rebalancer.ts\`: Rebalances inventory before expiry
+- \`v35/emergency-recovery.ts\`: Recovery from error states
+- \`v35/expiry-snapshot.ts\`: Captures state at market expiry
+
+### Core Shared Modules
+
+**Risk Management:**
 - \`core/hard-invariants.ts\`: Position caps, freeze rules, CPP limits
 - \`core/inventory-risk.ts\`: Inventory skew management
 - \`core/price-guard.ts\`: Price validation and sanity checks
+- \`core/exposure-ledger.ts\`: Tracks USD exposure per market
+
+**Order Execution:**
+- \`core/order-rate-limiter.ts\`: Rate limiting per market/token
+- \`core/burst-limiter.ts\`: Burst protection to avoid API blocks
+- \`core/sell-policy.ts\`: When and how to exit positions
+
+**Position Tracking:**
+- \`core/position-cache.ts\`: In-memory position state
+- \`core/positions-sync.ts\`: Syncs with Polymarket API
+- \`core/market-state-manager.ts\`: Market lifecycle states
+- \`core/accounting-ledger.ts\`: P&L tracking
+
+**Infrastructure:**
+- \`core/polymarket.ts\`: CLOB API wrapper
+- \`core/backend.ts\`: Supabase backend integration
+- \`core/authManager.ts\`: API authentication
+- \`core/chain.ts\`: Blockchain interaction
+- \`core/telemetry.ts\`: Metrics and logging
 
 ## Key Concepts
 
-### Delta Mispricing
-When spot price is near strike price, the fair value of UP/DOWN should be ~50/50.
-If Polymarket shows UP at 40c when fair value is 50c, we BUY UP expecting correction.
+### Passive Market Making
+The bot places limit orders on both UP and DOWN sides, earning the spread when both fill.
+Unlike aggressive strategies, it waits for others to take liquidity.
 
-### Correction Phase
-After entry, we wait for Polymarket to reprice toward fair value.
-During this phase: NO hedging, NO adding, NO selling.
+### Fair Value Calculation
+When spot price is near strike, fair value for UP/DOWN is ~50/50.
+The bot adjusts quotes based on:
+- Distance from strike price
+- Time remaining until expiry
+- Current inventory imbalance
 
-### Hedge Phase
-Once correction is confirmed (price moved X% toward expected), we hedge the opposite side
-to lock in profit regardless of final outcome.
+### Paired Positions
+When holding both UP and DOWN shares, the outcome is guaranteed:
+- Paired shares: locked profit = 1.00 - (avgUp + avgDown)
+- Unpaired shares: at-risk inventory
 
-### Adverse Selection Filters
-Before entry, we check for:
-1. Aggressive taker flow (large fills, high volume)
-2. Book shape asymmetry (one side much deeper)
-3. Spread expansion (widening spreads indicate uncertainty)
-
-## Timing & Speed
-
-### Cadence States
-- COLD: Eval every 2000ms (nothing happening)
-- WARM: Eval every 500ms (near signal detected)
-- HOT: Eval every 100ms (active trading opportunity)
-
-### Order Latency Targets
-- Price feed: <50ms from Binance/Polymarket
-- Signal to order: <100ms
-- Order to fill confirmation: <500ms
+### Reversal Detection
+When spot price crosses the strike, the expected winner changes.
+The bot needs to manage unpaired inventory during reversals.
 
 ## Configuration
 
-Key parameters in \`v27/config.ts\`:
-- \`deltaThreshold\`: Minimum delta % to trigger entry (e.g., 8%)
-- \`correctionThresholdPct\`: % move toward expected to confirm correction
-- \`maxNotionalPerTrade\`: Maximum USD per trade
-- \`maxPositionsPerAsset\`: Concurrent position limit
+Key parameters in \`v35/config.ts\`:
+- Quote width and depth
+- Maximum position sizes
+- Hedge thresholds
+- Circuit breaker conditions
 
 ## Files Structure
 
 \`\`\`
-├── v28/           # V28 Pre-signed order runner
-├── v27/           # V27 Delta mispricing strategy
-├── core/          # Shared infrastructure
-└── docs/          # Strategy documentation
+├── v35/           # V35 Passive Market Maker (24 files)
+├── core/          # Shared infrastructure (20 files)
+└── docs/          # Strategy documentation (5 files)
 \`\`\`
 
 ## Questions for Review
 
-1. Is the mispricing detection logic sound?
-2. Are the adverse selection filters sufficient?
-3. Is the correction detection reliable?
-4. Are there edge cases in the hedge logic?
-5. Is the rate limiting adequate?
-6. Are there race conditions in the order flow?
+1. Is the quoting engine calculating fair values correctly?
+2. How does the bot handle high-reversal (choppy) markets?
+3. Are the hedge triggers appropriately timed?
+4. Is inventory risk being managed effectively?
+5. Are there race conditions in the order/fill flow?
+6. How can performance in 5+ crossing markets be improved?
+
+## Recent Findings
+
+Analysis of last 24 hours shows:
+- 0-2 crossings: 66-100% win rate
+- 3-4 crossings: 62-67% win rate  
+- 5+ crossings: 47% win rate (major loss driver)
+
+The strategy needs improvement for choppy/ranging markets.
 
 ---
-Contact: [Your contact info]
+Package Version: V35
+Generated: ${new Date().toISOString()}
 `;
       rootFolder.file('README.md', readme);
 
@@ -216,7 +251,7 @@ Contact: [Your contact info]
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `polymarket-strategy-v28-review-${new Date().toISOString().split('T')[0]}.zip`;
+      a.download = `polymarket-strategy-v35-review-${new Date().toISOString().split('T')[0]}.zip`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -243,7 +278,7 @@ Contact: [Your contact info]
       ) : (
         <FileCode className="w-3 h-3 mr-2" />
       )}
-      {isDownloading ? 'Creating...' : 'Strategy Export'}
+      {isDownloading ? 'Creating...' : 'V35 Strategy Export'}
     </Button>
   );
 }
