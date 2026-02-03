@@ -18,7 +18,7 @@
  * - Safety guardrails (no double claims, min threshold, retry logic)
  * - Event-based confirmation (PayoutRedemption events)
  * 
- * @version 4.0.0 - V35.16.0: Relayer API as primary path for Magic/Email wallets
+ * @version 4.1.0 - V35.17.0: Using official Relayer V2 API (relayer-v2.polymarket.com)
  */
 
 import pkg from 'ethers';
@@ -522,11 +522,15 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
 // For Magic/Email wallets, the exported private key CANNOT call proxy.proxy()
 // directly. Only Polymarket's backend (via Relayer API) can sign these txs.
 // 
+// V35.17.0: Using official Relayer V2 API at relayer-v2.polymarket.com
+// Reference: https://docs.polymarket.com/developers/builders/relayer-client
+// 
 // Endpoints:
 //   POST /redeem - Gasless redemption via Polymarket infrastructure
 // ============================================================================
 
-const RELAYER_BASE_URL = 'https://clob.polymarket.com';
+// Official Polymarket Relayer V2 API
+const RELAYER_BASE_URL = 'https://relayer-v2.polymarket.com';
 
 interface RelayerRedeemRequest {
   conditionId: string;
@@ -544,7 +548,7 @@ interface RelayerRedeemResponse {
 async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimResult> {
   const conditionId = position.conditionId;
   
-  console.log(`   🌐 V35.16.0: Attempting Relayer API redemption (gasless)`);
+  console.log(`   🌐 V35.17.0: Attempting Relayer V2 API redemption (gasless)`);
   console.log(`   📍 Condition ID: ${conditionId}`);
   
   if (!hasBuilderCredentials()) {
@@ -569,13 +573,14 @@ async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimR
     );
     const signature = buildRelayerSignature(secretBytes, timestamp, method, requestPath, body);
     
+    // V35.17.0: Official Relayer V2 header format (underscores, not hyphens)
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'POLY-ADDRESS': config.polymarket.address || wallet?.address || '',
-      'POLY-SIGNATURE': signature,
-      'POLY-TIMESTAMP': timestamp,
-      'POLY-API-KEY': config.polymarket.builderApiKey!,
-      'POLY-PASSPHRASE': config.polymarket.builderPassphrase!,
+      'POLY_ADDRESS': config.polymarket.address || wallet?.address || '',
+      'POLY_SIGNATURE': signature,
+      'POLY_TIMESTAMP': timestamp,
+      'POLY_API_KEY': config.polymarket.builderApiKey!,
+      'POLY_PASSPHRASE': config.polymarket.builderPassphrase!,
     };
 
     console.log(`   📡 POST ${RELAYER_BASE_URL}${requestPath}`);
