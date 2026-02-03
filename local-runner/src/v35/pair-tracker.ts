@@ -130,7 +130,7 @@ const DEFAULT_CONFIG: PairTrackerConfig = {
   minSharesPerPair: 5,
   maxSharesPerPair: 20,
   startupDelayMs: 60_000,            // 1 MINUTE observation period
-  pairCooldownMs: 20_000,            // V36.3.4: 20 seconds between new pairs
+  pairCooldownMs: 10_000,            // V36.12: 10 seconds between new pairs
 };
 
 // ============================================================
