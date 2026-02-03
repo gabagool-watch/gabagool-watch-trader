@@ -536,7 +536,7 @@ export class PairTracker {
     // Profit margin scales with delta confidence:
     // - Large delta (|delta| > 500): High confidence → 10¢ margin
     // - Medium delta (|delta| > 200): Medium confidence → 7¢ margin  
-    // - Small-medium (|delta| > 50): Low-medium confidence → 5¢ margin
+    // - Small-medium (|delta| > 50): Low-medium confidence → 4¢ margin
     // - Small delta (|delta| <= 50): Low confidence → 3¢ margin
     //
     // This allows more profit when we're confident, less when uncertain.
@@ -559,7 +559,7 @@ export class PairTracker {
       targetMargin = 0.07;  // 7¢ - medium confidence
       confidenceLevel = 'MEDIUM';
     } else if (absDelta > 50) {
-      targetMargin = 0.05;  // 5¢ - low-medium confidence
+      targetMargin = 0.04;  // 4¢ - low-medium confidence (V36.8.1)
       confidenceLevel = 'LOW_MEDIUM';
     } else {
       targetMargin = 0.03;  // 3¢ - low confidence, play safe
