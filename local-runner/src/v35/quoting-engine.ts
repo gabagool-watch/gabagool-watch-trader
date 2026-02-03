@@ -1,27 +1,20 @@
 // ============================================================
 // V35 QUOTING ENGINE - GABAGOOL MODE
 // ============================================================
-// Version: V35.12.0 - "Directional Bias (Follow the Winner)"
+// Version: V36.8.0 - "Volatility-Scaled Margin"
 //
-// V35.12.0 CRITICAL CHANGES:
+// V36.8.0 CHANGES:
 // ================================================================
-// CORE INSIGHT: Gabagool ends with MORE shares in the WINNING direction.
-// We were doing the opposite - accumulating cheap (losing) shares.
+// NEW: Volatility-based margin scaling using ATR from Binance feed.
+// - HIGH volatility → smaller margin (0.5x) → faster fills
+// - LOW volatility → full margin (1.0x) → more conservative
 //
-// NEW STRATEGY: FOLLOW THE MARKET
-// 1. Expensive side (price > 0.50) = likely WINNER → quote AGGRESSIVELY
-// 2. Cheap side (price < 0.50) = likely LOSER → quote CONSERVATIVELY
-// 3. When spread > 15¢ → STOP quoting cheap side entirely
-// 4. Size ratio: Quote 3x more shares on expensive side
-//
-// This ensures we accumulate the WINNING side, not the losing side.
-// ================================================================
-//
-// V35.11.4 KEPT:
+// V35.12.0 KEPT:
+// - Directional bias (follow the winner)
 // - Hard 100-share cap per side
 // - Effective exposure tracking
 //
-// CORE PRINCIPLE: Follow the winner, avoid the loser.
+// CORE PRINCIPLE: Follow the winner, adjust margin to volatility.
 // ============================================================
 
 import { getV35Config, V35_VERSION, type V35Config } from './config.js';
@@ -34,6 +27,8 @@ import {
   EXPOSURE_CAP_CONFIG,
   type Side as LedgerSide 
 } from '../exposure-ledger.js';
+import { getBinanceFeed } from './binance-feed.js';
+import { calculateDynamicMargin, getMarginSummary, isVolatilityMarginEnabled } from './dynamic-margin.js';
 
 interface QuoteDecision {
   quotes: V35Quote[];
@@ -162,6 +157,12 @@ export class QuotingEngine {
     const spread = Math.abs(sidePrice - otherPrice);
     const isExpensiveSide = side === expensiveSide;
     const isCheapSide = side === cheapSide;
+    
+    // V36.8.0: Log volatility-scaled margin info
+    if (isVolatilityMarginEnabled() && market.strikePrice) {
+      const marginResult = calculateDynamicMargin(market.asset as any, market.strikePrice);
+      console.log(`[QuotingEngine] 📈 VOL-MARGIN: ${getMarginSummary(marginResult)}`);
+    }
     
     console.log(`[QuotingEngine] 🎯 DIRECTIONAL: ${side} price=$${sidePrice.toFixed(2)} isExpensive=${isExpensiveSide} spread=${(spread * 100).toFixed(1)}¢`);
     

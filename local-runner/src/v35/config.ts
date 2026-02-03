@@ -21,10 +21,37 @@
 // This ensures imbalances are FIXED, not abandoned via bans.
 // ============================================================
 
-export const V35_VERSION = 'V36.7.0';
-export const V35_CODENAME = 'Dynamic Delta Margin';
+export const V35_VERSION = 'V36.8.0';
+export const V35_CODENAME = 'Volatility-Scaled Margin';
 
 export type V35Mode = 'test' | 'moderate' | 'production';
+
+// V36.8.0: Volatility-based margin configuration
+export interface VolatilityMarginConfig {
+  enabled: boolean;
+  
+  // ATR thresholds (in percentage)
+  lowVolATR: number;      // < this = LOW volatility
+  highVolATR: number;     // > this = HIGH volatility
+  
+  // Base margins per delta bucket (in $)
+  deltaMargins: {
+    high: number;     // Delta > 500: 10¢
+    medium: number;   // Delta > 200: 7¢
+    low: number;      // Delta > 50: 5¢
+    veryLow: number;  // Delta ≤ 50: 3¢
+  };
+  
+  // Volatility multipliers (smaller = tighter margin)
+  volatilityMultipliers: {
+    low: number;      // Low vol: use full margin
+    medium: number;   // Med vol: reduced margin
+    high: number;     // High vol: minimal margin
+  };
+  
+  // Minimum margin floor (never go below this)
+  minMargin: number;
+}
 
 export interface V35Config {
   // =========================================================================
@@ -83,6 +110,11 @@ export interface V35Config {
   // 🚫 FEATURES
   // =========================================================================
   enableMomentumFilter: boolean;    // MUST BE FALSE - reduces fills
+  
+  // =========================================================================
+  // 📈 V36.8.0: VOLATILITY-BASED MARGIN
+  // =========================================================================
+  volatilityMargin: VolatilityMarginConfig;
   
   // =========================================================================
   // 🎯 ASSETS
@@ -155,6 +187,25 @@ export const TEST_CONFIG: V35Config = {
   // Features
   enableMomentumFilter: false,
   
+  // V36.8.0: Volatility-based margin
+  volatilityMargin: {
+    enabled: true,
+    lowVolATR: 0.10,      // < 0.10% = LOW volatility
+    highVolATR: 0.25,     // > 0.25% = HIGH volatility
+    deltaMargins: {
+      high: 0.10,         // Delta > 500: 10¢
+      medium: 0.07,       // Delta > 200: 7¢
+      low: 0.05,          // Delta > 50: 5¢
+      veryLow: 0.03,      // Delta ≤ 50: 3¢
+    },
+    volatilityMultipliers: {
+      low: 1.0,           // Low vol: use full margin
+      medium: 0.7,        // Med vol: 70% of base
+      high: 0.5,          // High vol: 50% of base
+    },
+    minMargin: 0.02,      // 2¢ absolute minimum
+  },
+  
   enabledAssets: ['BTC'],
   
   clobUrl: 'https://clob.polymarket.com',
@@ -208,6 +259,25 @@ export const MODERATE_CONFIG: V35Config = {
   // Features
   enableMomentumFilter: false,
   
+  // V36.8.0: Volatility-based margin
+  volatilityMargin: {
+    enabled: true,
+    lowVolATR: 0.10,
+    highVolATR: 0.25,
+    deltaMargins: {
+      high: 0.10,
+      medium: 0.07,
+      low: 0.05,
+      veryLow: 0.03,
+    },
+    volatilityMultipliers: {
+      low: 1.0,
+      medium: 0.7,
+      high: 0.5,
+    },
+    minMargin: 0.02,
+  },
+  
   enabledAssets: ['BTC', 'ETH'],
   
   clobUrl: 'https://clob.polymarket.com',
@@ -260,6 +330,25 @@ export const PRODUCTION_CONFIG: V35Config = {
   
   // Features
   enableMomentumFilter: false,
+  
+  // V36.8.0: Volatility-based margin
+  volatilityMargin: {
+    enabled: true,
+    lowVolATR: 0.10,
+    highVolATR: 0.25,
+    deltaMargins: {
+      high: 0.10,
+      medium: 0.07,
+      low: 0.05,
+      veryLow: 0.03,
+    },
+    volatilityMultipliers: {
+      low: 1.0,
+      medium: 0.7,
+      high: 0.5,
+    },
+    minMargin: 0.02,
+  },
   
   enabledAssets: ['BTC', 'ETH'],
   
@@ -316,6 +405,13 @@ export function printV35Config(cfg: V35Config): void {
      Min edge:        ${(cfg.minEdgeAfterHedge * 100).toFixed(1)}%
      Max combined:    $${cfg.maxCombinedCost.toFixed(2)} (emergency: $${cfg.maxCombinedCostEmergency.toFixed(2)})
      Min notional:    $${cfg.minHedgeNotional?.toFixed(2) || '1.00'}
+
+  📈 V36.8.0: VOLATILITY-SCALED MARGIN
+     Enabled:         ${cfg.volatilityMargin?.enabled ? '✅ YES' : '❌ NO'}
+     ATR thresholds:  LOW < ${(cfg.volatilityMargin?.lowVolATR || 0.10).toFixed(2)}% | HIGH > ${(cfg.volatilityMargin?.highVolATR || 0.25).toFixed(2)}%
+     Delta margins:   HIGH=${(cfg.volatilityMargin?.deltaMargins?.high || 0.10) * 100}¢ MED=${(cfg.volatilityMargin?.deltaMargins?.medium || 0.07) * 100}¢ LOW=${(cfg.volatilityMargin?.deltaMargins?.low || 0.05) * 100}¢ VLOW=${(cfg.volatilityMargin?.deltaMargins?.veryLow || 0.03) * 100}¢
+     Vol multipliers: LOW=${cfg.volatilityMargin?.volatilityMultipliers?.low || 1.0}x MED=${cfg.volatilityMargin?.volatilityMultipliers?.medium || 0.7}x HIGH=${cfg.volatilityMargin?.volatilityMultipliers?.high || 0.5}x
+     Min margin:      ${(cfg.volatilityMargin?.minMargin || 0.02) * 100}¢
 
   🛡️ CIRCUIT BREAKER
      ⚠️ WARNING:      ${cfg.warnUnpairedShares} shares (block leading side)

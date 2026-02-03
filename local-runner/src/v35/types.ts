@@ -17,6 +17,9 @@ export interface V35Market {
   asset: V35Asset;
   expiry: Date;
   
+  // V36.8.0: Strike price for dynamic margin calculation
+  strikePrice?: number;
+  
   // Orderbook state
   upBestBid: number;
   upBestAsk: number;

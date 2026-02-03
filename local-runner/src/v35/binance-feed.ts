@@ -1,17 +1,31 @@
 // ============================================================
 // V35 BINANCE PRICE FEED
 // ============================================================
-// Real-time price feed from Binance for momentum detection.
-// Prevents quoting when market is trending (exit liquidity protection).
+// V36.8.0: Added ATR-based volatility regime detection
+//
+// Features:
+// 1. Real-time price feed from Binance
+// 2. Momentum detection (trending UP/DOWN/NEUTRAL)
+// 3. ATR calculation for volatility-based margin scaling
+// 4. 1-minute candle aggregation for volatility analysis
 // ============================================================
 
 import WebSocket from 'ws';
 
 export type V35Asset = 'BTC' | 'ETH' | 'SOL' | 'XRP';
+export type VolatilityRegime = 'LOW' | 'MEDIUM' | 'HIGH';
 
 interface PricePoint {
   price: number;
   time: number;
+}
+
+interface Candle {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  timestamp: number; // Start of the minute (truncated to minute)
 }
 
 interface MomentumState {
@@ -19,6 +33,13 @@ interface MomentumState {
   momentum: number; // Percentage change over lookback
   direction: 'UP' | 'DOWN' | 'NEUTRAL';
   isTrending: boolean;
+  lastUpdate: number;
+}
+
+interface VolatilityState {
+  atrPercent: number;           // ATR as percentage of price
+  regime: VolatilityRegime;     // LOW/MEDIUM/HIGH
+  candleCount: number;          // Number of candles used
   lastUpdate: number;
 }
 
@@ -38,6 +59,14 @@ const ASSET_FROM_SYMBOL: Record<string, V35Asset> = {
   XRPUSDT: 'XRP',
 };
 
+// ATR Configuration
+const ATR_CONFIG = {
+  candleCount: 5,              // Number of 1-minute candles for ATR
+  lowVolThreshold: 0.10,       // ATR < 0.10% = LOW volatility
+  highVolThreshold: 0.25,      // ATR > 0.25% = HIGH volatility
+  maxCandleHistory: 10,        // Keep last 10 candles per asset
+};
+
 // Callback for price tick logging
 type PriceTickCallback = (asset: V35Asset, price: number, ts: number) => void;
 let priceTickCallback: PriceTickCallback | null = null;
@@ -55,6 +84,11 @@ export class BinancePriceFeed {
   
   // Current momentum state per asset
   private momentum: Map<V35Asset, MomentumState> = new Map();
+  
+  // V36.8.0: Candle history for ATR calculation
+  private candles: Map<V35Asset, Candle[]> = new Map();
+  private currentCandle: Map<V35Asset, Candle | null> = new Map();
+  private volatility: Map<V35Asset, VolatilityState> = new Map();
   
   // Configuration
   private lookbackSeconds = 30; // Look back 30 seconds for momentum
@@ -76,6 +110,15 @@ export class BinancePriceFeed {
         momentum: 0,
         direction: 'NEUTRAL',
         isTrending: false,
+        lastUpdate: 0,
+      });
+      // V36.8.0: Initialize candle and volatility tracking
+      this.candles.set(asset, []);
+      this.currentCandle.set(asset, null);
+      this.volatility.set(asset, {
+        atrPercent: 0,
+        regime: 'MEDIUM', // Default to MEDIUM (safest)
+        candleCount: 0,
         lastUpdate: 0,
       });
     }
@@ -169,6 +212,105 @@ export class BinancePriceFeed {
     
     // Update momentum calculation
     this.calculateMomentum(asset);
+    
+    // V36.8.0: Update candle and ATR calculation
+    this.updateCandle(asset, price, now);
+  }
+  
+  /**
+   * V36.8.0: Update 1-minute candle with new price tick
+   */
+  private updateCandle(asset: V35Asset, price: number, now: number): void {
+    // Truncate timestamp to start of current minute
+    const minuteTimestamp = Math.floor(now / 60000) * 60000;
+    
+    let current = this.currentCandle.get(asset);
+    
+    // Check if we need to start a new candle
+    if (!current || current.timestamp !== minuteTimestamp) {
+      // Close previous candle if exists
+      if (current) {
+        const candles = this.candles.get(asset) || [];
+        candles.push(current);
+        
+        // Keep only last N candles
+        while (candles.length > ATR_CONFIG.maxCandleHistory) {
+          candles.shift();
+        }
+        
+        this.candles.set(asset, candles);
+        
+        // Recalculate ATR with new closed candle
+        this.calculateATR(asset);
+      }
+      
+      // Start new candle
+      current = {
+        open: price,
+        high: price,
+        low: price,
+        close: price,
+        timestamp: minuteTimestamp,
+      };
+    } else {
+      // Update current candle
+      current.high = Math.max(current.high, price);
+      current.low = Math.min(current.low, price);
+      current.close = price;
+    }
+    
+    this.currentCandle.set(asset, current);
+  }
+  
+  /**
+   * V36.8.0: Calculate ATR (Average True Range) as percentage
+   */
+  private calculateATR(asset: V35Asset): void {
+    const candles = this.candles.get(asset) || [];
+    const now = Date.now();
+    
+    // Need at least 3 candles for meaningful ATR
+    if (candles.length < 3) {
+      this.volatility.set(asset, {
+        atrPercent: 0,
+        regime: 'MEDIUM', // Default to MEDIUM when insufficient data
+        candleCount: candles.length,
+        lastUpdate: now,
+      });
+      return;
+    }
+    
+    // Use last N candles (or all available if less)
+    const candlesToUse = candles.slice(-ATR_CONFIG.candleCount);
+    
+    // Calculate ATR: average of (high - low) for each candle
+    let totalRange = 0;
+    for (const candle of candlesToUse) {
+      totalRange += candle.high - candle.low;
+    }
+    
+    const avgRange = totalRange / candlesToUse.length;
+    const currentPrice = this.momentum.get(asset)?.currentPrice || candlesToUse[candlesToUse.length - 1].close;
+    
+    // Convert to percentage
+    const atrPercent = currentPrice > 0 ? (avgRange / currentPrice) * 100 : 0;
+    
+    // Determine volatility regime
+    let regime: VolatilityRegime;
+    if (atrPercent < ATR_CONFIG.lowVolThreshold) {
+      regime = 'LOW';
+    } else if (atrPercent > ATR_CONFIG.highVolThreshold) {
+      regime = 'HIGH';
+    } else {
+      regime = 'MEDIUM';
+    }
+    
+    this.volatility.set(asset, {
+      atrPercent,
+      regime,
+      candleCount: candlesToUse.length,
+      lastUpdate: now,
+    });
   }
   
   /**
@@ -280,6 +422,49 @@ export class BinancePriceFeed {
     }
     
     return true;
+  }
+  
+  /**
+   * V36.8.0: Get ATR as percentage for asset
+   */
+  getATR(asset: V35Asset): number {
+    return this.volatility.get(asset)?.atrPercent || 0;
+  }
+  
+  /**
+   * V36.8.0: Get volatility regime for asset
+   */
+  getVolatilityRegime(asset: V35Asset): VolatilityRegime {
+    return this.volatility.get(asset)?.regime || 'MEDIUM';
+  }
+  
+  /**
+   * V36.8.0: Get volatility multiplier for margin calculation
+   * HIGH volatility = 0.5 (smaller margin, faster fills)
+   * MEDIUM volatility = 0.7
+   * LOW volatility = 1.0 (full margin)
+   */
+  getVolatilityMultiplier(asset: V35Asset): number {
+    const regime = this.getVolatilityRegime(asset);
+    switch (regime) {
+      case 'LOW': return 1.0;
+      case 'MEDIUM': return 0.7;
+      case 'HIGH': return 0.5;
+    }
+  }
+  
+  /**
+   * V36.8.0: Get full volatility state for logging
+   */
+  getVolatilityState(asset: V35Asset): VolatilityState | undefined {
+    return this.volatility.get(asset);
+  }
+  
+  /**
+   * V36.8.0: Get all volatility states
+   */
+  getAllVolatilityStates(): Map<V35Asset, VolatilityState> {
+    return new Map(this.volatility);
   }
   
   /**
