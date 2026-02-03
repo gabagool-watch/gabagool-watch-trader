@@ -57,6 +57,8 @@ export interface V35Order {
 // Fill Events
 // ============================================================
 
+export type V35FillType = 'MAKER' | 'TAKER';
+
 export interface V35Fill {
   orderId: string;
   tokenId: string;
@@ -65,7 +67,8 @@ export interface V35Fill {
   size: number;
   timestamp: Date;
   marketSlug: string;
-  asset: V35Asset;
+  asset: V35Asset | string;
+  fillType?: V35FillType;  // V36.8.0: Track whether this was a maker or taker fill
 }
 
 // ============================================================

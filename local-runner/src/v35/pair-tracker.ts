@@ -733,7 +733,38 @@ export class PairTracker {
         
         console.log(`[PairTracker] 🟠 ${pairId} TAKER FILLED: ${filledSize} @ $${filledPrice.toFixed(2)}`);
         
-        // Log taker fill event
+        // =========================================================================
+        // V36.8.0 FIX: SAVE TAKER FILL DIRECTLY TO DATABASE
+        // =========================================================================
+        // The WebSocket may reject this fill due to race condition (orderId not yet
+        // whitelisted when WS receives the fill). So we MUST save the fill here
+        // directly from the HTTP response, bypassing the WebSocket entirely.
+        // This is critical for accurate v35_fills logging!
+        // =========================================================================
+        const takerFill = {
+          orderId: takerResult.orderId || `taker_${pairId}`,
+          tokenId: takerTokenId,
+          side: expensiveSide,
+          price: filledPrice,
+          size: filledSize,
+          timestamp: new Date(),
+          marketSlug: market.slug,
+          asset: market.asset,
+          fillType: 'TAKER' as const,
+        };
+        
+        // Save taker fill to database (fire-and-forget with error logging)
+        saveV35Fill(takerFill).then(success => {
+          if (success) {
+            console.log(`[PairTracker] ✅ V36.8.0: Saved TAKER fill to v35_fills: ${filledSize} ${expensiveSide} @ $${filledPrice.toFixed(2)}`);
+          } else {
+            console.warn(`[PairTracker] ⚠️ Failed to save TAKER fill to database`);
+          }
+        }).catch(err => {
+          console.error(`[PairTracker] ❌ Error saving TAKER fill:`, err?.message || err);
+        });
+        
+        // Log taker fill event (legacy event log)
         logPairEvent({
           pairId,
           eventType: 'pair_taker_filled',
