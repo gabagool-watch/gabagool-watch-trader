@@ -76,8 +76,19 @@ export async function sendV35Heartbeat(data: V35HeartbeatData): Promise<boolean>
 // FILL LOGGING
 // ============================================================
 
+/**
+ * Save a fill to the v35_fills table
+ * 
+ * V36.8.0: Now accepts optional fillType parameter to distinguish
+ * between MAKER and TAKER fills. This is critical for accurate P&L
+ * tracking since TAKER fills were previously not being logged due
+ * to WebSocket race conditions.
+ */
 export async function saveV35Fill(fill: V35Fill): Promise<boolean> {
   try {
+    // V36.8.0: Use fillType from fill object, default to MAKER for backwards compatibility
+    const fillType = fill.fillType || 'MAKER';
+    
     const result = await callProxy<{ success: boolean }>('save-v35-fill', {
       fill: {
         order_id: fill.orderId,
@@ -88,7 +99,7 @@ export async function saveV35Fill(fill: V35Fill): Promise<boolean> {
         timestamp: fill.timestamp.toISOString(),
         market_slug: fill.marketSlug,
         asset: fill.asset,
-        fill_type: 'MAKER', // V35 always places maker orders
+        fill_type: fillType,
       },
     });
     return result.success;
