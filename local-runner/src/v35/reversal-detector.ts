@@ -41,9 +41,8 @@ export interface ReversalDetectorConfig {
   // Time window to detect Binance signal (ms)
   binanceWindowMs: number;               // e.g., 2000 = 2 seconds
   
-  // Stage 2: Share price reversal threshold
-  shareReversalThresholdCents: number;   // e.g., 15 = expensive side drops 15c
-  deltaFlipThreshold: number;            // e.g., 0.52 = trigger when price nears 50c
+  // Stage 2: Share price reversal = crossing 50c (sides flip)
+  flipThreshold: number;                  // 0.50 = trigger when expensive side drops BELOW 50c
   
   // How often to check (ms)
   checkIntervalMs: number;
@@ -58,8 +57,7 @@ export interface ReversalDetectorConfig {
 const DEFAULT_CONFIG: ReversalDetectorConfig = {
   binanceSignalThresholdUsd: 30,         // $30 Binance move = ALERT
   binanceWindowMs: 2000,                  // Within 2 seconds
-  shareReversalThresholdCents: 15,        // 15c drop on expensive side
-  deltaFlipThreshold: 0.52,               // When expensive side drops below 52c
+  flipThreshold: 0.50,                    // Reversal = expensive side drops BELOW 50c
   checkIntervalMs: 100,                   // Check every 100ms
   alertModeDurationMs: 30_000,            // Alert mode lasts 30 seconds
   cooldownAfterReversalMs: 5000,
@@ -267,16 +265,13 @@ export class ReversalDetector {
       ? market.upBestAsk 
       : market.downBestAsk;
     
-    const priceDrop = alertState.expensivePriceAtAlert - currentExpensivePrice;
-    const priceDropCents = priceDrop * 100;
+    // =========================================================================
+    // REVERSAL = EXPENSIVE SIDE CROSSES BELOW 50c (sides flip!)
+    // =========================================================================
+    // This is the ONLY trigger - when the expensive side is no longer expensive
+    const hasFlipped = currentExpensivePrice < this.config.flipThreshold;
     
-    // Check reversal conditions:
-    // 1. Expensive side dropped significantly (>15c)
-    // 2. OR expensive side is now near/below 50c (delta flip)
-    const significantDrop = priceDropCents >= this.config.shareReversalThresholdCents;
-    const nearFlip = currentExpensivePrice <= this.config.deltaFlipThreshold;
-    
-    if (!significantDrop && !nearFlip) {
+    if (!hasFlipped) {
       // No reversal yet, keep watching
       return { reversalConfirmed: false, emergencyTriggered: false };
     }
@@ -292,17 +287,16 @@ export class ReversalDetector {
     // Remove from alert mode
     this.alertStates.delete(market.slug);
     
-    const triggerReason = significantDrop 
-      ? `${alertState.expensiveSideAtAlert} dropped ${priceDropCents.toFixed(0)}c` 
-      : `${alertState.expensiveSideAtAlert} near flip @ ${(currentExpensivePrice * 100).toFixed(0)}c`;
+    const newExpensiveSide: V35Side = alertState.expensiveSideAtAlert === 'UP' ? 'DOWN' : 'UP';
+    const newExpensivePrice = newExpensiveSide === 'UP' ? market.upBestAsk : market.downBestAsk;
     
     console.log(`\n[ReversalDetector] ════════════════════════════════════════════════════`);
-    console.log(`[ReversalDetector] ⚡ STAGE 2: REVERSAL CONFIRMED!`);
+    console.log(`[ReversalDetector] ⚡ REVERSAL CONFIRMED - SIDES FLIPPED!`);
     console.log(`[ReversalDetector]    Market: ${market.slug.slice(-30)}`);
-    console.log(`[ReversalDetector]    Trigger: ${triggerReason}`);
-    console.log(`[ReversalDetector]    ${alertState.expensiveSideAtAlert}: ${(alertState.expensivePriceAtAlert * 100).toFixed(0)}c → ${(currentExpensivePrice * 100).toFixed(0)}c`);
+    console.log(`[ReversalDetector]    ${alertState.expensiveSideAtAlert}: ${(alertState.expensivePriceAtAlert * 100).toFixed(0)}c → ${(currentExpensivePrice * 100).toFixed(0)}c (crossed 50c!)`);
+    console.log(`[ReversalDetector]    NEW expensive side: ${newExpensiveSide} @ ${(newExpensivePrice * 100).toFixed(0)}c`);
     console.log(`[ReversalDetector]    🔓 +3 PAIR CAPACITY ENABLED for 30s`);
-    console.log(`[ReversalDetector]    💡 Capitalize on new expensive side immediately!`);
+    console.log(`[ReversalDetector]    💡 Capitalize on ${newExpensiveSide} immediately!`);
     console.log(`[ReversalDetector] ════════════════════════════════════════════════════\n`);
     
     // Log event
@@ -313,8 +307,8 @@ export class ReversalDetector {
       blockedSide: null,
       upQty: market.upQty,
       downQty: market.downQty,
-      expensiveSide: alertState.expensiveSideAtAlert,
-      reason: triggerReason,
+      expensiveSide: newExpensiveSide,
+      reason: `Sides flipped! ${alertState.expensiveSideAtAlert} crossed below 50c → ${newExpensiveSide} now expensive`,
     }).catch(() => {});
     
     // =========================================================================
