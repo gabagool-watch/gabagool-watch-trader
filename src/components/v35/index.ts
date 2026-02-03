@@ -12,3 +12,4 @@ export { V35ImbalanceChart } from './V35ImbalanceChart';
 export { V35PairLog } from './V35PairLog';
 export { V35MarketPriceChart } from './V35MarketPriceChart';
 export { V35PairFillTimeTable } from './V35PairFillTimeTable';
+export { V35AnalysisExport } from './V35AnalysisExport';
