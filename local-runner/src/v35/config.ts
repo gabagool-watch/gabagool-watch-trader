@@ -155,14 +155,15 @@ export const TEST_CONFIG: V35Config = {
   gridStep: 0.02,
   sharesPerLevel: 5,
   
-  // HEDGE PARAMETERS - V36.4.0: TARGET 0.95 CPP, 1 PAIR AT A TIME
+  // HEDGE PARAMETERS - V36.11.0: AGGRESSIVE REBALANCING
+  // PRIORITY: Fix imbalance ASAP - accept small losses to avoid big directional losses
   enableActiveHedge: true,
-  maxHedgeSlippage: 0.10,           // Accept up to 10¢ slippage for hedge
-  hedgeTimeoutMs: 2000,             // 2 second timeout
-  minEdgeAfterHedge: -0.05,         // Max 5% loss for hedge
-  maxCombinedCost: 0.95,            // Target 5% profit ($0.95 combined)
-  maxCombinedCostEmergency: 1.00,   // Emergency: break-even max
-  maxExpensiveBias: 1.50,           // Expensive side can have 50% more shares
+  maxHedgeSlippage: 0.12,           // Accept up to 12¢ slippage for hedge
+  hedgeTimeoutMs: 1500,             // 1.5 second timeout (faster)
+  minEdgeAfterHedge: -0.10,         // Max 10% loss for hedge OK
+  maxCombinedCost: 0.98,            // Target: aim for 2% profit, but flexible
+  maxCombinedCostEmergency: 1.05,   // Emergency: accept 5% LOSS to fix imbalance!
+  maxExpensiveBias: 1.30,           // Tighter: expensive side max 30% more shares
   minHedgeNotional: 1.05,           // Just above exchange min
   
   // Risk limits - V35.10.0 (same tiers)
@@ -227,14 +228,14 @@ export const MODERATE_CONFIG: V35Config = {
   gridStep: 0.02,
   sharesPerLevel: 5,
   
-  // HEDGE PARAMETERS - V35.10.0 CONTINUOUS HEDGE
+  // HEDGE PARAMETERS - V36.11.0: AGGRESSIVE REBALANCING
   enableActiveHedge: true,
-  maxHedgeSlippage: 0.08,
-  hedgeTimeoutMs: 2000,
-  minEdgeAfterHedge: -0.15,
-  maxCombinedCost: 1.02,
-  maxCombinedCostEmergency: 1.15,
-  maxExpensiveBias: 1.50,
+  maxHedgeSlippage: 0.12,           // Accept up to 12¢ slippage
+  hedgeTimeoutMs: 1500,             // 1.5s timeout
+  minEdgeAfterHedge: -0.10,         // Max 10% loss OK
+  maxCombinedCost: 1.00,            // Target break-even
+  maxCombinedCostEmergency: 1.08,   // Emergency: accept 8% LOSS to fix!
+  maxExpensiveBias: 1.30,           // Tighter ratio
   minHedgeNotional: 1.05,
   
   // Risk limits
@@ -299,14 +300,14 @@ export const PRODUCTION_CONFIG: V35Config = {
   gridStep: 0.02,
   sharesPerLevel: 10,
   
-  // HEDGE PARAMETERS - V35.10.0 CONTINUOUS HEDGE
+  // HEDGE PARAMETERS - V36.11.0: AGGRESSIVE REBALANCING
   enableActiveHedge: true,
-  maxHedgeSlippage: 0.08,
-  hedgeTimeoutMs: 2000,
-  minEdgeAfterHedge: -0.15,
-  maxCombinedCost: 1.02,
-  maxCombinedCostEmergency: 1.15,
-  maxExpensiveBias: 1.50,
+  maxHedgeSlippage: 0.12,           // Accept up to 12¢ slippage
+  hedgeTimeoutMs: 1500,             // 1.5s timeout
+  minEdgeAfterHedge: -0.10,         // Max 10% loss OK
+  maxCombinedCost: 1.00,            // Target break-even
+  maxCombinedCostEmergency: 1.08,   // Emergency: accept 8% LOSS to fix!
+  maxExpensiveBias: 1.30,           // Tighter ratio
   minHedgeNotional: 1.05,
   
   // Risk limits
