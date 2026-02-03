@@ -1,5 +1,8 @@
-
 # Plan: Volatility-Based Dynamic Margin (ATR-Schaling)
+
+## ✅ STATUS: GEÏMPLEMENTEERD (V36.8.0)
+
+---
 
 ## Kernidee
 
@@ -15,132 +18,69 @@ Bij **hoge volatiliteit** neem je een **kleinere marge**, omdat de markt sneller
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Wat is ATR?
+---
 
-**Average True Range (ATR)** meet de gemiddelde prijsbeweging per tijdsperiode:
+## ✅ Geïmplementeerde Bestanden
 
-```text
-1-minuut ATR = gemiddelde van |high - low| over laatste N kaarsen
-            = gemiddelde beweging in % per minuut
-```
+### 1. `local-runner/src/v35/binance-feed.ts` ✅
+- 1-minuut candle aggregatie uit prijs ticks
+- ATR berekening over laatste 5 candles  
+- Volatility regime classificatie (LOW/MEDIUM/HIGH)
+- Nieuwe methodes:
+  - `getATR(asset)` → ATR in % 
+  - `getVolatilityRegime(asset)` → 'LOW' | 'MEDIUM' | 'HIGH'
+  - `getVolatilityMultiplier(asset)` → 0.5 - 1.0
+  - `getVolatilityState(asset)` → full state for logging
 
-Dit vereist **geen orderbook data, geen volume data** - alleen de prijshistorie die de `BinancePriceFeed` al verzamelt.
+### 2. `local-runner/src/v35/config.ts` ✅
+- `VolatilityMarginConfig` interface toegevoegd
+- Configuratie in TEST_CONFIG, MODERATE_CONFIG, PRODUCTION_CONFIG
+- Updated `printV35Config()` met volatility info
+- Versie: V36.8.0 "Volatility-Scaled Margin"
+
+### 3. `local-runner/src/v35/dynamic-margin.ts` ✅ (NIEUW)
+- Centrale margin berekening engine
+- Combineert Delta Margin + Volatility Scaling
+- Exports:
+  - `calculateDynamicMargin(asset, strikePrice)` → DynamicMarginResult
+  - `isVolatilityMarginEnabled()` → boolean
+  - `getMarginSummary(result)` → string voor logging
+
+### 4. `local-runner/src/v35/quoting-engine.ts` ✅
+- Import van `dynamic-margin.ts`
+- Logging van volatility margin bij quote generatie
+- Versie header updated naar V36.8.0
+
+### 5. `local-runner/src/v35/types.ts` ✅
+- `strikePrice?: number` toegevoegd aan V35Market interface
 
 ---
 
-## Implementatie Stappen
-
-### Stap 1: ATR Berekening Toevoegen aan BinancePriceFeed
-
-**Bestand:** `local-runner/src/v35/binance-feed.ts`
-
-Voeg toe:
-- 1-minuut "candles" berekening uit bestaande prijs ticks
-- ATR berekening over laatste 5 candles
-- Volatility regime classificatie (LOW/MEDIUM/HIGH)
-
-```text
-Nieuwe methodes:
-├── getATR(asset): number          → ATR in % (bijv. 0.15 = 0.15%)
-├── getVolatilityRegime(asset): 'LOW' | 'MEDIUM' | 'HIGH'
-└── getVolatilityMultiplier(asset): number → 0.5 - 1.0
-```
-
-### Stap 2: Volatility-Based Margin Config
-
-**Bestand:** `local-runner/src/v35/config.ts`
-
-Nieuwe configuratie parameters:
+## Configuratie (in alle modes)
 
 ```typescript
-// Volatility-based margin adjustment
 volatilityMargin: {
   enabled: true,
-  
-  // ATR thresholds (in percentage)
-  lowVolATR: 0.10,      // < 0.10% = low volatility
-  highVolATR: 0.25,     // > 0.25% = high volatility
-  
-  // Base margins per delta bucket (bestaande Dynamic Delta Margin)
+  lowVolATR: 0.10,      // < 0.10% = LOW volatility
+  highVolATR: 0.25,     // > 0.25% = HIGH volatility
   deltaMargins: {
-    high: 0.10,    // Delta > 500: 10¢
-    medium: 0.07,  // Delta > 200: 7¢
-    low: 0.05,     // Delta > 50: 5¢
-    veryLow: 0.03, // Delta ≤ 50: 3¢
+    high: 0.10,         // Delta > 500: 10¢
+    medium: 0.07,       // Delta > 200: 7¢
+    low: 0.05,          // Delta > 50: 5¢
+    veryLow: 0.03,      // Delta ≤ 50: 3¢
   },
-  
-  // Volatility multipliers (smaller = tighter margin)
   volatilityMultipliers: {
-    low: 1.0,      // Low vol: use full margin
-    medium: 0.7,   // Med vol: 70% of base margin
-    high: 0.5,     // High vol: 50% of base margin
+    low: 1.0,           // Low vol: full margin
+    medium: 0.7,        // Med vol: 70% of base
+    high: 0.5,          // High vol: 50% of base
   },
-  
-  // Minimum margin floor (never go below this)
-  minMargin: 0.02,  // 2¢ absolute minimum
+  minMargin: 0.02,      // 2¢ absolute minimum
 }
 ```
-
-### Stap 3: Quoting Engine Aanpassing
-
-**Bestand:** `local-runner/src/v35/quoting-engine.ts`
-
-Bij het genereren van quotes:
-
-```text
-1. Haal huidige volatiliteit regime op van BinancePriceFeed
-2. Bepaal base margin op basis van delta (bestaande logica)
-3. Pas volatilityMultiplier toe: finalMargin = baseMargin * multiplier
-4. Gebruik finalMargin voor quote prijs berekening
-```
-
-### Stap 4: Logging & Telemetrie
-
-Voeg logging toe zodat je kunt zien:
-- Huidige ATR per asset
-- Volatiliteit regime (LOW/MEDIUM/HIGH)
-- Toegepaste margin multiplier
-- Resulterende margin
 
 ---
 
-## Technische Details
-
-### ATR Berekening (1-minuut candles)
-
-```typescript
-interface Candle {
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  timestamp: number;
-}
-
-// Build 1-minute candles from price ticks
-// ATR = average(high - low) over last 5 candles
-// Return as percentage: (ATR / currentPrice) * 100
-```
-
-### Volatility Regime Bepaling
-
-```typescript
-function getVolatilityRegime(atrPercent: number): 'LOW' | 'MEDIUM' | 'HIGH' {
-  if (atrPercent < 0.10) return 'LOW';
-  if (atrPercent > 0.25) return 'HIGH';
-  return 'MEDIUM';
-}
-
-function getMarginMultiplier(regime: 'LOW' | 'MEDIUM' | 'HIGH'): number {
-  switch (regime) {
-    case 'LOW': return 1.0;    // Volledige marge
-    case 'MEDIUM': return 0.7;  // 70% van base
-    case 'HIGH': return 0.5;    // 50% van base
-  }
-}
-```
-
-### Voorbeeld Scenario
+## Voorbeeld Scenario
 
 ```text
 BTC prijs: $100,000
@@ -169,31 +109,8 @@ Final margin: 7¢ × 0.5 = 3.5¢ → afgerond 4¢
 
 ---
 
-## Bestanden die Aangepast Worden
+## Volgende Stappen (optioneel)
 
-1. **`local-runner/src/v35/binance-feed.ts`**
-   - ATR berekening
-   - Candle aggregatie
-   - Volatility regime API
-
-2. **`local-runner/src/v35/config.ts`**
-   - Nieuwe volatility margin config
-   - Thresholds en multipliers
-
-3. **`local-runner/src/v35/quoting-engine.ts`**
-   - Integratie van volatility-adjusted margin
-   - Logging van toegepaste multiplier
-
-4. **`local-runner/src/v35/runner.ts`** (indien nodig)
-   - Doorgeven van volatility info aan quoting engine
-
----
-
-## Risico's & Mitigatie
-
-| Risico | Mitigatie |
-|--------|-----------|
-| Te agressief bij hoge vol → reversals | Minimum margin floor van 2¢ |
-| ATR berekening onnauwkeurig bij weinig data | Fallback naar MEDIUM regime bij < 3 candles |
-| Inconsistente margin tussen ticks | Smooth ATR met EWMA in plaats van simple average |
-
+1. **Integratie in order placement**: De `calculateDynamicMargin` functie kan nu gebruikt worden in de runner of hedge-manager om daadwerkelijk de quote prijzen aan te passen
+2. **Telemetrie naar database**: Log de volatility regime en toegepaste multiplier naar de database voor analyse
+3. **Dashboard**: Toon ATR en volatility regime in de UI
