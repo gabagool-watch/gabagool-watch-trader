@@ -311,10 +311,14 @@ export class PairTracker {
     
     // V36.3.8 CRITICAL: Block if too many WAITING_HEDGE pairs!
     // These are takers that filled but makers haven't → unhedged exposure!
-    // Max 3 waiting pairs allowed - if more, we MUST wait for makers to fill
-    const MAX_WAITING_HEDGE = 3;
+    // V36.9.1: During reversal, allow more waiting pairs to enable recovery
+    const reversalDetector = getReversalDetector();
+    const isReversalActive = reversalDetector.isReversalActive();
+    const MAX_WAITING_HEDGE = isReversalActive ? 6 : 3;  // V36.9.1: 3 → 6 during reversal
+    
     if (waiting >= MAX_WAITING_HEDGE) {
-      console.log(`[PairTracker] 🚨 V36.3.8 BLOCK: ${waiting} pairs WAITING_HEDGE (max ${MAX_WAITING_HEDGE}) - too much unhedged exposure!`);
+      const modeLabel = isReversalActive ? 'REVERSAL MODE' : 'normal';
+      console.log(`[PairTracker] 🚨 V36.3.8 BLOCK: ${waiting} pairs WAITING_HEDGE (max ${MAX_WAITING_HEDGE}) [${modeLabel}] - too much unhedged exposure!`);
       console.log(`[PairTracker]    💡 Waiting for maker orders to fill before opening more pairs`);
       return false;
     }
