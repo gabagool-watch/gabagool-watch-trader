@@ -309,26 +309,22 @@ export class PairTracker {
       return false;
     }
     
-    // V36.3.8 CRITICAL: Block if too many WAITING_HEDGE pairs!
-    // These are takers that filled but makers haven't → unhedged exposure!
-    // V36.9.1: During reversal, allow more waiting pairs to enable recovery
-    const reversalDetector = getReversalDetector();
-    const isReversalActive = reversalDetector.isReversalActive();
-    const MAX_WAITING_HEDGE = isReversalActive ? 6 : 3;  // V36.9.1: 3 → 6 during reversal
-    
-    if (waiting >= MAX_WAITING_HEDGE) {
-      const modeLabel = isReversalActive ? 'REVERSAL MODE' : 'normal';
-      console.log(`[PairTracker] 🚨 V36.3.8 BLOCK: ${waiting} pairs WAITING_HEDGE (max ${MAX_WAITING_HEDGE}) [${modeLabel}] - too much unhedged exposure!`);
-      console.log(`[PairTracker]    💡 Waiting for maker orders to fill before opening more pairs`);
-      return false;
-    }
-    
-    // V36.6: Check for active reversal → use higher capacity
+    // V36.9.1: Check for active reversal → use higher capacity
     const reversalDetector = getReversalDetector();
     const isReversalActive = reversalDetector.isReversalActive();
     const effectiveMax = isReversalActive 
       ? this.config.maxPendingPairsReversal 
       : this.config.maxPendingPairs;
+    
+    // V36.9.1 FIX: MAX_WAITING_HEDGE should match effectiveMax, not be a separate restrictive limit
+    // Old behavior: MAX_WAITING_HEDGE = 3 blocked new pairs even when maxPendingPairs = 5
+    // New behavior: WAITING_HEDGE limit = effectiveMax (5 normally, 8 during reversal)
+    if (waiting >= effectiveMax) {
+      const modeLabel = isReversalActive ? 'REVERSAL MODE' : 'normal';
+      console.log(`[PairTracker] 🚨 BLOCK: ${waiting} pairs WAITING_HEDGE (max ${effectiveMax}) [${modeLabel}]`);
+      console.log(`[PairTracker]    💡 Waiting for maker orders to fill before opening more pairs`);
+      return false;
+    }
     
     if (count >= effectiveMax) {
       const modeLabel = isReversalActive ? 'REVERSAL MODE' : 'normal';
