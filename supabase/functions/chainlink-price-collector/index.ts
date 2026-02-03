@@ -46,9 +46,120 @@ const BINANCE_SYMBOLS: Record<string, string> = {
   'XRP': 'XRPUSDT',
 };
 
+// Fetch historical Chainlink price via Alchemy API (more accurate than Binance)
+// Uses eth_call with block number to get historical price at specific block
+async function fetchChainlinkHistoricalPrice(asset: string, targetTimestampMs: number): Promise<{ price: number; timestamp: number; source: string } | null> {
+  const feedAddress = CHAINLINK_FEEDS[asset];
+  if (!feedAddress) return null;
+
+  const alchemyApiKey = Deno.env.get('ALCHEMY_POLYGON_API_KEY');
+  if (!alchemyApiKey) {
+    console.log(`[chainlink_historical] No Alchemy API key configured`);
+    return null;
+  }
+
+  try {
+    // Step 1: Find the block number closest to the target timestamp
+    // Polygon has ~2 second blocks, so we estimate the block number
+    const targetTimestampSec = Math.floor(targetTimestampMs / 1000);
+    
+    // Get current block to estimate
+    const currentBlockRes = await fetch(`https://polygon-mainnet.g.alchemy.com/v2/${alchemyApiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'eth_blockNumber',
+        params: [],
+        id: 1
+      })
+    });
+    
+    if (!currentBlockRes.ok) {
+      console.log(`[chainlink_historical] Failed to get current block: ${currentBlockRes.status}`);
+      return null;
+    }
+    
+    const currentBlockData = await currentBlockRes.json();
+    const currentBlock = parseInt(currentBlockData.result, 16);
+    
+    // Get current block timestamp
+    const currentBlockInfoRes = await fetch(`https://polygon-mainnet.g.alchemy.com/v2/${alchemyApiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'eth_getBlockByNumber',
+        params: [currentBlockData.result, false],
+        id: 1
+      })
+    });
+    
+    if (!currentBlockInfoRes.ok) {
+      console.log(`[chainlink_historical] Failed to get block info: ${currentBlockInfoRes.status}`);
+      return null;
+    }
+    
+    const currentBlockInfo = await currentBlockInfoRes.json();
+    const currentTimestamp = parseInt(currentBlockInfo.result.timestamp, 16);
+    
+    // Estimate target block (~2 sec per block on Polygon)
+    const secondsDiff = currentTimestamp - targetTimestampSec;
+    const blocksDiff = Math.floor(secondsDiff / 2);
+    const targetBlock = Math.max(1, currentBlock - blocksDiff);
+    
+    console.log(`[chainlink_historical] Target block estimate: ${targetBlock} (current: ${currentBlock}, diff: ${blocksDiff} blocks)`);
+    
+    // Step 2: Query Chainlink at that historical block
+    const data = '0xfeaf968c'; // latestRoundData()
+    
+    const response = await fetch(`https://polygon-mainnet.g.alchemy.com/v2/${alchemyApiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'eth_call',
+        params: [{
+          to: feedAddress,
+          data: data
+        }, `0x${targetBlock.toString(16)}`],
+        id: 1
+      })
+    });
+
+    if (!response.ok) {
+      console.log(`[chainlink_historical] RPC error: ${response.status}`);
+      return null;
+    }
+
+    const result = await response.json();
+    if (result.error) {
+      console.log(`[chainlink_historical] RPC error:`, result.error);
+      return null;
+    }
+
+    // Parse the response - each value is 32 bytes (64 hex chars)
+    const hex = result.result.slice(2); // remove 0x
+    const answerHex = hex.slice(64, 128); // second 32-byte slot (answer)
+    const updatedAtHex = hex.slice(192, 256); // fourth 32-byte slot (updatedAt)
+    
+    const answer = BigInt('0x' + answerHex);
+    const updatedAt = Number(BigInt('0x' + updatedAtHex));
+    
+    // Chainlink uses 8 decimals for most feeds
+    const price = Number(answer) / 1e8;
+    
+    console.log(`[chainlink_historical] ${asset} price at block ${targetBlock}: $${price.toFixed(6)} (updatedAt: ${new Date(updatedAt * 1000).toISOString()})`);
+    return { price, timestamp: updatedAt * 1000, source: 'chainlink_historical' };
+  } catch (e) {
+    console.error(`[chainlink_historical] Error fetching ${asset}:`, e);
+    return null;
+  }
+}
+
 // Fetch historical Binance price at exact timestamp using klines (candles)
 // Returns the OPEN price of the 1-minute candle that started at the given timestamp
-// This is the most accurate way to get the price at an exact quarter-hour mark
+// This is used as a fallback when Chainlink historical data is not available
 async function fetchBinanceHistoricalPrice(asset: string, timestampMs: number): Promise<{ price: number; timestamp: number } | null> {
   const symbol = BINANCE_SYMBOLS[asset];
   if (!symbol) return null;
@@ -126,34 +237,20 @@ async function fetchChainlinkRtdsPrice(
   }
 }
 
-// Fetch current price from Polymarket RTDS API (fallback, less accurate for strike)
+// Fetch current price from Polymarket API (for close prices, less accurate for strikes)
 async function fetchPolymarketApiPrice(asset: string): Promise<{ price: number; timestamp: number } | null> {
   try {
-    // Use Polymarket's data API 
-    const assetLower = asset.toLowerCase();
-    const response = await fetch(`https://data-api.polymarket.com/prices?assets=${assetLower}`);
-    
-    if (!response.ok) {
-      console.log(`[polymarket_api] API error: ${response.status}`);
-      return null;
+    // Try to get current price from Chainlink directly - more accurate than Polymarket API
+    const clPrice = await fetchChainlinkPrice(asset);
+    if (clPrice) {
+      return clPrice;
     }
-
-    const data = await response.json();
-    const price = data?.[assetLower];
-    
-    if (typeof price === 'number' && price > 0) {
-      console.log(`[polymarket_api] ${asset} price: $${price.toFixed(6)}`);
-      return { price, timestamp: Date.now() };
-    }
-    
     return null;
   } catch (e) {
     console.error(`[polymarket_api] Error fetching ${asset}:`, e);
     return null;
   }
 }
-
-// Fallback: Fetch current price from Chainlink via public RPC
 async function fetchChainlinkPrice(asset: string): Promise<{ price: number; timestamp: number } | null> {
   const feedAddress = CHAINLINK_FEEDS[asset];
   if (!feedAddress) {
@@ -380,12 +477,15 @@ async function storePrices(
     }
     
     // Handle open price - USE chainlink_rtds from realtime_price_logs (EXACT "Price to Beat")
+    // Fallback order: 1) RTDS logs, 2) Chainlink historical via Alchemy, 3) Binance klines
     if (market.needsOpenPrice && !existing?.open_price) {
       const targetOpenTimeMs = market.eventStartTime * 1000;
       const timeSinceStart = now - targetOpenTimeMs;
       
-      // Only try to get open price if we're within 10 minutes of start
-      if (timeSinceStart >= 0 && timeSinceStart <= 10 * 60 * 1000) {
+      // Only try to get open price if we're within 15 minutes of start
+      if (timeSinceStart >= 0 && timeSinceStart <= 15 * 60 * 1000) {
+        let foundPrice = false;
+        
         // PRIMARY: Get exact chainlink_rtds price from our logged ticks
         const chainlinkRtdsPrice = await fetchChainlinkRtdsPrice(supabase, market.asset, targetOpenTimeMs);
         
@@ -397,9 +497,45 @@ async function storePrices(
           updates.quality = determineQuality(chainlinkRtdsPrice.timestamp, targetOpenTimeMs);
           updates.chainlink_timestamp = Math.floor(chainlinkRtdsPrice.timestamp / 1000);
           openStored++;
-          console.log(`✅ Open price for ${market.slug}: $${updates.open_price} (source: chainlink_rtds, quality: ${updates.quality}, tick at ${new Date(chainlinkRtdsPrice.timestamp).toISOString()})`);
-        } else {
-          // FALLBACK: Use current API price if no logged tick found
+          foundPrice = true;
+          console.log(`✅ Open price for ${market.slug}: $${updates.open_price} (source: chainlink_rtds, quality: ${updates.quality})`);
+        }
+        
+        // SECONDARY: Try Chainlink historical via Alchemy (more accurate than Binance)
+        if (!foundPrice) {
+          const chainlinkHistorical = await fetchChainlinkHistoricalPrice(market.asset, targetOpenTimeMs);
+          if (chainlinkHistorical) {
+            updates.open_price = Math.round(chainlinkHistorical.price * 1000000) / 1000000;
+            updates.open_timestamp = chainlinkHistorical.timestamp;
+            updates.strike_price = updates.open_price;
+            updates.source = 'chainlink_historical';
+            // Chainlink on-chain updates every ~20-60 seconds, so mark as 'late' not 'exact'
+            updates.quality = 'late';
+            updates.chainlink_timestamp = Math.floor(chainlinkHistorical.timestamp / 1000);
+            openStored++;
+            foundPrice = true;
+            console.log(`⚠️ Open price for ${market.slug}: $${updates.open_price} (source: chainlink_historical, quality: late)`);
+          }
+        }
+        
+        // TERTIARY: Binance historical klines as last resort
+        if (!foundPrice) {
+          const binancePrice = await fetchBinanceHistoricalPrice(market.asset, targetOpenTimeMs);
+          if (binancePrice) {
+            updates.open_price = Math.round(binancePrice.price * 1000000) / 1000000;
+            updates.open_timestamp = binancePrice.timestamp;
+            updates.strike_price = updates.open_price;
+            updates.source = 'binance_historical';
+            updates.quality = 'estimated';
+            updates.chainlink_timestamp = Math.floor(binancePrice.timestamp / 1000);
+            openStored++;
+            foundPrice = true;
+            console.log(`⚠️ Open price for ${market.slug}: $${updates.open_price} (source: binance_historical, quality: estimated)`);
+          }
+        }
+        
+        // FINAL FALLBACK: Current price (least accurate)
+        if (!foundPrice) {
           const priceData = currentPrices[market.asset];
           if (priceData) {
             updates.open_price = Math.round(priceData.price * 1000000) / 1000000;
@@ -409,7 +545,7 @@ async function storePrices(
             updates.quality = 'estimated';
             updates.chainlink_timestamp = Math.floor(now / 1000);
             openStored++;
-            console.log(`⚠️ Open price for ${market.slug}: $${updates.open_price} (FALLBACK: ${priceData.source}, no chainlink_rtds tick found)`);
+            console.log(`❌ Open price for ${market.slug}: $${updates.open_price} (FALLBACK: ${priceData.source}, no historical data available)`);
           }
         }
       }
