@@ -44,9 +44,11 @@ interface V35ImbalanceChartProps {
   }>;
   // Sync ID for synchronized tooltips across charts
   syncId?: string;
+  // Start timestamp for synchronized time axis (from parent)
+  startTs?: number;
 }
 
-export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, groundTruth, fills, syncId }: V35ImbalanceChartProps) {
+export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, groundTruth, fills, syncId, startTs: externalStartTs }: V35ImbalanceChartProps) {
   const chartData = useMemo(() => {
     // Use inventory snapshots as the primary data source (reliable position state)
     if (!inventorySnapshots || inventorySnapshots.length === 0) {
@@ -60,10 +62,10 @@ export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, grou
     // Sort by timestamp
     const sortedSnapshots = [...inventorySnapshots].sort((a, b) => a.ts - b.ts);
     
-    // Calculate the start of the 15-minute window from the first snapshot
+    // Use external startTs if provided (for synchronized time axis), otherwise calculate from first snapshot
     const firstTs = sortedSnapshots[0].ts;
-    // Round down to nearest 15 minutes to get window start
-    const windowStartMs = Math.floor(firstTs / (15 * 60 * 1000)) * (15 * 60 * 1000);
+    // If externalStartTs is provided, use it. Otherwise round down to nearest 15 minutes
+    const windowStartMs = externalStartTs ?? Math.floor(firstTs / (15 * 60 * 1000)) * (15 * 60 * 1000);
     
     // Cap by final API quantities when available.
     // Some historical snapshot rows contain reconciliation outliers (thousands of shares)
@@ -119,7 +121,7 @@ export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, grou
       : null;
 
     return { data, warning };
-  }, [inventorySnapshots, fills, groundTruth]);
+  }, [inventorySnapshots, fills, groundTruth, externalStartTs]);
 
   // Calculate stats from inventory data
   const stats = useMemo(() => {
@@ -395,7 +397,7 @@ export function V35ImbalanceChart({ inventorySnapshots, marketSlug, winner, grou
         {/* Unpaired/Imbalance chart */}
         <div className="h-[120px]">
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={chartData.data} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+            <AreaChart data={chartData.data} margin={{ top: 5, right: 10, left: 0, bottom: 0 }} syncId={syncId}>
               <defs>
                 <linearGradient id="unpairedGradientInv" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.5} />

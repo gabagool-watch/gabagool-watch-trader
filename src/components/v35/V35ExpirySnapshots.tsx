@@ -434,6 +434,7 @@ export function V35ExpirySnapshots() {
                       predicted_pnl: selectedMarket.predicted_pnl || 0,
                     }}
                     syncId={syncId}
+                    startTs={startTs}
                   />
                 ) : (
                   <div className="py-8 text-center text-muted-foreground">
