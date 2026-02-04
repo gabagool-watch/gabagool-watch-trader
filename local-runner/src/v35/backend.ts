@@ -441,6 +441,13 @@ export interface V35ExpirySnapshotData {
   crossingCount: number | null;
   spotPrice: number | null;
   strikePrice: number | null;
+  // V37.4.0: Merge tracking fields
+  exitType?: 'SETTLE' | 'MERGE' | 'PARTIAL_MERGE';
+  mergedShares?: number;
+  mergeTxHash?: string;
+  mergeExecutedAt?: string;
+  mergeGasUsed?: number;
+  mergeError?: string;
 }
 
 export async function saveV35ExpirySnapshot(data: V35ExpirySnapshotData): Promise<boolean> {
@@ -484,6 +491,13 @@ export async function saveV35ExpirySnapshot(data: V35ExpirySnapshotData): Promis
         crossing_count: data.crossingCount,
         spot_price: data.spotPrice,
         strike_price: data.strikePrice,
+        // V37.4.0: Merge tracking
+        exit_type: data.exitType || 'SETTLE',
+        merged_shares: data.mergedShares || 0,
+        merge_tx_hash: data.mergeTxHash,
+        merge_executed_at: data.mergeExecutedAt,
+        merge_gas_used: data.mergeGasUsed,
+        merge_error: data.mergeError,
       },
     });
     return result.success;
