@@ -192,10 +192,7 @@ interface ClaimLogEntry {
 let claimMutexLocked = false;
 
 async function acquireClaimMutex(): Promise<boolean> {
-  if (claimMutexLocked) {
-    console.log('🔒 Claim mutex already held, skipping');
-    return false;
-  }
+  if (claimMutexLocked) return false;
   claimMutexLocked = true;
   return true;
 }
@@ -242,10 +239,7 @@ function getSupabaseClient() {
   const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
   
-  if (!url || !key) {
-    console.warn('⚠️ Supabase credentials not found, database logging disabled');
-    return null;
-  }
+  if (!url || !key) return null;
   
   supabase = createClient(url, key);
   return supabase;
@@ -260,21 +254,17 @@ async function logClaimToDatabase(entry: ClaimLogEntry): Promise<void> {
   if (!client) return;
   
   try {
-    const { error } = await client.from('claim_logs').insert({
+    await client.from('claim_logs').insert({
       ...entry,
       confirmed_at: entry.status === 'confirmed' ? new Date().toISOString() : null,
     });
-    
-    if (error) {
-      console.error('❌ Failed to log claim to database:', error.message);
-    }
-  } catch (e) {
-    console.error('❌ Database logging error:', e);
+  } catch {
+    // silent
   }
 }
 
 async function updateLiveTradeResultClaimStatus(
-  conditionId: string, 
+  _conditionId: string, 
   txHash: string, 
   usdcReceived: number
 ): Promise<void> {
@@ -282,8 +272,6 @@ async function updateLiveTradeResultClaimStatus(
   if (!client) return;
   
   try {
-    // Find the live_trade_results entry by condition_id pattern in market_slug
-    // Note: This is a best-effort update since we don't store condition_id directly
     await client
       .from('live_trade_results')
       .update({
@@ -294,9 +282,8 @@ async function updateLiveTradeResultClaimStatus(
       })
       .is('claim_status', null)
       .or('claim_status.eq.pending');
-      
-  } catch (e) {
-    console.error('❌ Failed to update live_trade_results:', e);
+  } catch {
+    // silent
   }
 }
 
@@ -310,41 +297,8 @@ let isAutoClaimRunning = false;
 
 function initializeRedeemer(): void {
   if (wallet) return;
-
-  console.log('🔧 Initializing redeemer...');
-
   const provider = getProvider();
   wallet = new Wallet(config.polymarket.privateKey, provider);
-
-  const signerAddress = wallet.address.toLowerCase();
-  const proxyAddress = (config.polymarket.address || '').toLowerCase();
-
-  console.log(`✅ Redeemer initialized`);
-  console.log(`   📍 Signer (EOA): ${wallet.address}`);
-  console.log(`   📍 Proxy wallet (config): ${config.polymarket.address || 'not set'}`);
-
-  // === DEBUG: Builder API credentials check ===
-  console.log(`\n🔍 DEBUG: Builder API credentials check:`);
-  console.log(`   POLY_BUILDER_API_KEY: ${config.polymarket.builderApiKey ? `✅ set (${config.polymarket.builderApiKey.length} chars)` : '❌ MISSING'}`);
-  console.log(`   POLY_BUILDER_API_SECRET: ${config.polymarket.builderApiSecret ? `✅ set (${config.polymarket.builderApiSecret.length} chars)` : '❌ MISSING'}`);
-  console.log(`   POLY_BUILDER_PASSPHRASE: ${config.polymarket.builderPassphrase ? `✅ set (${config.polymarket.builderPassphrase.length} chars)` : '❌ MISSING'}`);
-  console.log(`   hasBuilderCredentials(): ${hasBuilderCredentials() ? '✅ TRUE - Relayer API enabled' : '❌ FALSE - Direct on-chain mode'}`);
-  console.log(`   POLYMARKET_SIGNATURE_TYPE: ${config.polymarket.signatureType ?? 'not set (auto-detect)'}`);
-
-  // Detect wallet type
-  if (!proxyAddress) {
-    console.log(`\n⚠️ No POLYMARKET_ADDRESS set - will try direct EOA claiming`);
-  } else if (signerAddress === proxyAddress) {
-    console.log(`\n✅ Signer = Proxy (EOA mode) - direct claiming supported`);
-  } else {
-    console.log(`\n🔐 Signer ≠ Proxy (Proxy wallet mode)`);
-    if (hasBuilderCredentials()) {
-      console.log(`   ✅ Builder credentials found - will use Relayer API (gasless)`);
-    } else {
-      console.log(`   ⚠️ No Builder credentials - will attempt direct on-chain claiming`);
-      console.log(`   ⚠️ Ensure SIGNER has enough MATIC for gas (not the proxy)`);
-    }
-  }
 }
 
 function isProxyWalletMode(): boolean {
@@ -409,11 +363,6 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
   if (proxyWallet) walletsToCheck.add(proxyWallet.toLowerCase());
   if (signingWallet) walletsToCheck.add(signingWallet.toLowerCase());
 
-  console.log(`\n🔍 Fetching positions for ${walletsToCheck.size} wallet(s):`);
-  for (const w of walletsToCheck) {
-    console.log(`   📍 ${w}`);
-  }
-
   const allPositions: RedeemablePosition[] = [];
 
   for (const walletAddress of walletsToCheck) {
@@ -432,10 +381,7 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
           headers: { 'Accept': 'application/json' },
         });
 
-        if (!response.ok) {
-          console.error(`❌ API error for ${walletAddress}: HTTP ${response.status}`);
-          break;
-        }
+        if (!response.ok) break;
 
         const data = await response.json();
 
@@ -448,7 +394,6 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
           positions = data.positions;
           nextCursor = data.next_cursor || data.nextCursor || null;
         } else {
-          console.log(`⚠️ Unexpected API response for ${walletAddress}`);
           break;
         }
 
@@ -458,17 +403,13 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
         }
 
         allPositions.push(...positions);
-        console.log(`   📄 Page ${pageCount}: ${positions.length} positions for ${walletAddress.slice(0, 10)}...`);
-
         if (!nextCursor || nextCursor === cursor || positions.length === 0) break;
         cursor = nextCursor;
       }
-    } catch (error) {
-      console.error(`❌ Error fetching positions for ${walletAddress}:`, error);
+    } catch {
+      // ignore fetch errors
     }
   }
-
-  console.log(`📊 Total positions fetched: ${allPositions.length}`);
 
   // Filter redeemable, exclude confirmed claims, apply minimum threshold
   const redeemableByCondition = new Map<string, RedeemablePosition>();
@@ -482,7 +423,6 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
     
     // Skip if below minimum threshold
     if ((p.currentValue || 0) < MIN_CLAIM_THRESHOLD_USD) {
-      console.log(`   ⏭️ Skipping ${p.conditionId.slice(0, 10)}... (value $${p.currentValue?.toFixed(2)} < min $${MIN_CLAIM_THRESHOLD_USD})`);
       continue;
     }
 
@@ -496,23 +436,6 @@ async function fetchRedeemablePositions(): Promise<RedeemablePosition[]> {
 
   // Sort by value descending (claim highest value first)
   redeemable.sort((a, b) => (b.currentValue || 0) - (a.currentValue || 0));
-
-  if (redeemable.length > 0) {
-    const totalValue = redeemable.reduce((sum, p) => sum + (p.currentValue || 0), 0);
-    console.log(`\n💰 ${redeemable.length} redeemable positions ($${totalValue.toFixed(2)} total):`);
-    for (const p of redeemable.slice(0, 10)) { // Show max 10
-      console.log(`   💰 ${p.outcome} ${p.size.toFixed(0)} shares @ ${p.title?.slice(0, 45)}`);
-      console.log(`      Value: $${p.currentValue?.toFixed(2)} | Wallet: ${p.proxyWallet?.slice(0, 10)}...`);
-    }
-    if (redeemable.length > 10) {
-      console.log(`   ... and ${redeemable.length - 10} more`);
-    }
-  } else if (confirmedClaims.size > 0) {
-    console.log(`   ✅ All positions confirmed claimed (${confirmedClaims.size} total)`);
-  } else {
-    console.log(`   No redeemable positions above $${MIN_CLAIM_THRESHOLD_USD} threshold`);
-  }
-
   return redeemable;
 }
 
@@ -561,12 +484,7 @@ async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimR
   const conditionId = position.conditionId;
   const proxyWallet = position.proxyWallet || config.polymarket.address;
   
-  console.log(`   🌐 V36.8.3: Attempting gasless API redemption`);
-  console.log(`   📍 Condition ID: ${conditionId}`);
-  console.log(`   📍 Wallet: ${proxyWallet}`);
-  
   if (!hasBuilderCredentials()) {
-    console.log(`   ❌ No Builder API credentials - cannot use gasless redemption`);
     return {
       success: false,
       error: 'No Builder API credentials configured',
@@ -628,26 +546,20 @@ async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimR
         };
 
         const url = `${endpoint.host}${path}`;
-        console.log(`   📡 [${attemptCount}] POST ${url}`);
-
         let response: any;
         let responseText = '';
         try {
           response = await fetch(url, { method, headers, body });
           responseText = await response.text();
         } catch (netErr: any) {
-          const msg = netErr?.message || String(netErr);
-          console.log(`   ⚠️ Network error: ${msg.slice(0, 80)}`);
           lastFailure = {
             success: false,
-            error: msg,
+            error: netErr?.message || String(netErr),
             retryable: true,
             errorCode: 'RELAYER_NETWORK',
           };
           continue;
         }
-
-        console.log(`   📥 HTTP ${response.status}`);
 
         // Skip routing errors and try next endpoint
         if (response.status === 404 || response.status === 405) {
@@ -662,8 +574,6 @@ async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimR
 
         // Auth errors are definitive
         if (response.status === 401 || response.status === 403) {
-          console.log(`   ⚠️ Auth failed - check credentials`);
-          // Don't return immediately - try other endpoints with same creds
           lastFailure = {
             success: false,
             error: `Auth error (HTTP ${response.status})`,
@@ -691,7 +601,6 @@ async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimR
         } catch {
           // Some endpoints return empty 200 on success
           if (response.ok) {
-            console.log(`   ✅ Endpoint returned OK (empty response - may be queued)`);
             return { success: true, usdcReceived: position.currentValue || 0 };
           }
           lastFailure = {
@@ -707,13 +616,9 @@ async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimR
         const txHash = data.transactionHash || data.txHash || (data as any).tx_hash || (data as any).hash;
 
         if (txHash) {
-          console.log(`   ✅ Transaction submitted: ${txHash}`);
-          console.log(`   🔗 https://polygonscan.com/tx/${txHash}`);
-
           // Wait for confirmation
           const provider = getProvider();
           try {
-            console.log(`   ⏳ Waiting for confirmation...`);
             const receipt = await waitForTransaction(provider, txHash, 60000);
 
             if (receipt && receipt.status === 1) {
@@ -721,8 +626,6 @@ async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimR
               const totalPayout = events.length > 0
                 ? events.reduce((sum: number, e: PayoutRedemptionEvent) => sum + e.payoutUSDC, 0)
                 : position.currentValue || 0;
-
-              console.log(`   ✅ CONFIRMED: claimed $${totalPayout.toFixed(2)}`);
 
               confirmedClaims.set(conditionId, {
                 txHash,
@@ -738,8 +641,7 @@ async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimR
                 usdcReceived: totalPayout,
               };
             }
-          } catch (waitErr: any) {
-            console.log(`   ⚠️ Could not confirm tx: ${waitErr.message}`);
+          } catch {
             // Still return success since API accepted it
             return {
               success: true,
@@ -751,13 +653,11 @@ async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimR
 
         // Check for success flags
         if (data.success === true || response.ok) {
-          console.log(`   ✅ API reports success`);
           return { success: true, usdcReceived: position.currentValue || 0 };
         }
 
         // Error in response body
         const errorMsg = data.error || data.message || (data as any).msg || responseText.slice(0, 100);
-        console.log(`   ❌ Error: ${errorMsg}`);
 
         lastFailure = {
           success: false,
@@ -768,8 +668,6 @@ async function redeemViaRelayerAPI(position: RedeemablePosition): Promise<ClaimR
       }
     }
   }
-
-  console.log(`   ❌ All ${attemptCount} API endpoints exhausted`);
   
   return (
     lastFailure ?? {
@@ -847,11 +745,6 @@ async function redeemDirectCTF(position: RedeemablePosition): Promise<ClaimResul
   const conditionId = position.conditionId;
   const collateralToken = config.polymarket.usdcAddress;
   const provider = getProvider();
-  const signerAddress = wallet?.address || '';
-
-  console.log(`   🎯 Redeeming via DIRECT CTF.redeemPositions()`);
-  console.log(`   📍 Signer: ${signerAddress}`);
-  console.log(`   📍 Condition ID: ${conditionId}`);
 
   if (!wallet) {
     return {
@@ -891,12 +784,8 @@ async function redeemDirectCTF(position: RedeemablePosition): Promise<ClaimResul
       ? feeData.maxFeePerGas.mul(130).div(100)
       : minMaxFee;
 
-    console.log(`   ⛽ Gas: priority=${ethers.utils.formatUnits(maxPriorityFeePerGas, 'gwei')} gwei, max=${ethers.utils.formatUnits(maxFeePerGas, 'gwei')} gwei`);
-
     // Call CTF.redeemPositions directly
     const ctfContract = new ethers.Contract(CTF_ADDRESS, CTF_REDEEM_ABI, wallet);
-    
-    console.log(`   📡 Sending CTF.redeemPositions() transaction...`);
     const tx = await ctfContract.redeemPositions(
       collateralToken,
       parentCollectionId,
@@ -904,9 +793,6 @@ async function redeemDirectCTF(position: RedeemablePosition): Promise<ClaimResul
       indexSets,
       { maxPriorityFeePerGas, maxFeePerGas }
     );
-
-    console.log(`   ⏳ Tx sent: ${tx.hash}`);
-    console.log(`   🔗 View: https://polygonscan.com/tx/${tx.hash}`);
 
     // Wait for confirmation with timeout
     const receipt = await Promise.race([
@@ -931,8 +817,6 @@ async function redeemDirectCTF(position: RedeemablePosition): Promise<ClaimResul
       totalPayout = events.reduce((sum: number, e: PayoutRedemptionEvent) => sum + e.payoutUSDC, 0);
     }
 
-    console.log(`   ✅ CONFIRMED: claimed $${totalPayout.toFixed(2)}`);
-
     confirmedClaims.set(conditionId, {
       txHash: tx.hash,
       blockNumber: receipt.blockNumber,
@@ -951,7 +835,6 @@ async function redeemDirectCTF(position: RedeemablePosition): Promise<ClaimResul
 
   } catch (error: any) {
     const classified = classifyClaimError(error);
-    console.error(`   ❌ Direct CTF redeem failed: ${classified.message}`);
     return {
       success: false,
       error: classified.message,
@@ -975,11 +858,6 @@ async function redeemViaMagicProxy(position: RedeemablePosition): Promise<ClaimR
   const collateralToken = config.polymarket.usdcAddress;
   const provider = getProvider();
   const proxyAddress = config.polymarket.address;
-
-  console.log(`   🔧 V35.16.0: Proxy fallback via proxy.proxy()`);
-  console.log(`   ⚠️ Note: May fail for Magic wallets (signer not authorized)`);
-  console.log(`   📍 Proxy wallet: ${proxyAddress}`);
-  console.log(`   📍 Signer: ${wallet?.address}`);
 
   if (!wallet || !proxyAddress) {
     return {
@@ -1026,18 +904,12 @@ async function redeemViaMagicProxy(position: RedeemablePosition): Promise<ClaimR
       ? feeData.maxFeePerGas.mul(130).div(100)
       : minMaxFee;
 
-    console.log(`   ⛽ Gas: priority=${ethers.utils.formatUnits(maxPriorityFeePerGas, 'gwei')} gwei`);
-    console.log(`   📡 Calling proxy.proxy(CTF, redeemCalldata)...`);
-
     // Call proxy.proxy() - this makes the PROXY the msg.sender in CTF
     const proxyContract = new ethers.Contract(proxyAddress, POLYMARKET_PROXY_WALLET_ABI, wallet);
     const tx = await proxyContract.proxy(CTF_ADDRESS, redeemCalldata, {
       maxPriorityFeePerGas,
       maxFeePerGas,
     });
-
-    console.log(`   ⏳ Tx sent: ${tx.hash}`);
-    console.log(`   🔗 View: https://polygonscan.com/tx/${tx.hash}`);
 
     // Wait for confirmation
     const receipt = await Promise.race([
@@ -1063,8 +935,6 @@ async function redeemViaMagicProxy(position: RedeemablePosition): Promise<ClaimR
       totalPayout = events.reduce((sum: number, e: PayoutRedemptionEvent) => sum + e.payoutUSDC, 0);
     }
 
-    console.log(`   ✅ CONFIRMED: claimed $${totalPayout.toFixed(2)}`);
-
     confirmedClaims.set(conditionId, {
       txHash: tx.hash,
       blockNumber: receipt.blockNumber,
@@ -1083,7 +953,6 @@ async function redeemViaMagicProxy(position: RedeemablePosition): Promise<ClaimR
 
   } catch (error: any) {
     const classified = classifyClaimError(error);
-    console.error(`   ❌ Proxy redemption failed: ${classified.message}`);
     return {
       success: false,
       error: classified.message,
@@ -1108,23 +977,14 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
   const positionWallet = (position.proxyWallet || '').toLowerCase();
   const signerWallet = (wallet?.address || '').toLowerCase();
   const configProxy = (config.polymarket.address || '').toLowerCase();
-  
-  console.log(`   🔧 V35.16.0: Determining redemption path`);
-  console.log(`   📍 Position held by: ${positionWallet.slice(0, 10)}...`);
-  console.log(`   📍 Signer wallet: ${signerWallet.slice(0, 10)}...`);
-  console.log(`   📍 Config proxy: ${configProxy.slice(0, 10) || 'not set'}...`);
 
-  // V35.16.0: Position in signer wallet - direct CTF call works
+  // Position in signer wallet - direct CTF call works
   if (positionWallet === signerWallet) {
-    console.log(`   🎯 Position in SIGNER wallet → using direct CTF call`);
     return redeemDirectCTF(position);
   }
 
-  // Position in proxy wallet - MUST use Relayer API
-  // Direct proxy.proxy() doesn't work for Magic wallets (signer not authorized)
+  // Position in proxy wallet - use Relayer API
   if (configProxy && positionWallet === configProxy) {
-    console.log(`   🎯 Position in PROXY wallet → trying Relayer API first`);
-    
     // Try Relayer API (gasless)
     if (hasBuilderCredentials()) {
       const relayerResult = await redeemViaRelayerAPI(position);
@@ -1144,11 +1004,8 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
         return relayerResult;
       }
       
-      // Relayer unavailable - try fallback approaches
-      console.log(`   ⚠️ Relayer unavailable, trying proxy.proxy() fallback...`);
+      // Relayer unavailable - try fallback
     }
-    
-    // Fallback: try proxy.proxy() (may fail for Magic wallets)
     const proxyResult = await redeemViaMagicProxy(position);
     if (proxyResult.success) {
       return proxyResult;
@@ -1167,7 +1024,6 @@ async function redeemDirectEOA(position: RedeemablePosition): Promise<ClaimResul
   }
 
   // Position in unknown wallet
-  console.log(`   ❌ No redemption path available`);
   return {
     success: false,
     error: `Position wallet ${positionWallet} not controlled by signer`,
@@ -1203,14 +1059,6 @@ async function claimPositionWithLogging(position: RedeemablePosition): Promise<C
     block_number: null,
   };
 
-  console.log(`\n💎 CLAIMING: ${position.title?.slice(0, 50)}`);
-  console.log(`   Outcome: ${position.outcome} | Value: $${position.currentValue?.toFixed(2)}`);
-  console.log(`   ConditionId: ${position.conditionId}`);
-  console.log(`   Position wallet: ${position.proxyWallet}`);
-  console.log(`   Signer wallet: ${walletAddress}`);
-
-  // V35.15.0: Both EOA and Proxy modes are now supported
-  // Proxy mode uses proxy.proxy() method which works for Magic/Email wallets
   const result = await redeemDirectEOA(position);
 
   // Update log with result
@@ -1235,10 +1083,8 @@ async function claimPositionWithLogging(position: RedeemablePosition): Promise<C
 
   // Handle retry logic
   if (!result.success) {
-    // If explicitly non-retryable (e.g., insufficient MATIC for gas), do not spam retries.
     if (result.retryable === false) {
       pendingRetries.delete(position.conditionId);
-      console.log(`   ⛔ Not retrying (non-retryable): ${result.errorCode || 'error'}`);
       return result;
     }
 
@@ -1249,12 +1095,10 @@ async function claimPositionWithLogging(position: RedeemablePosition): Promise<C
       pendingRetries.set(position.conditionId, {
         position,
         retryCount,
-        nextRetryAt: Date.now() + RETRY_BACKOFF_MS * retryCount, // Exponential backoff
+        nextRetryAt: Date.now() + RETRY_BACKOFF_MS * retryCount,
       });
-      console.log(`   🔄 Scheduled retry ${retryCount}/${MAX_RETRY_COUNT} in ${RETRY_BACKOFF_MS * retryCount / 1000}s`);
     } else {
       pendingRetries.delete(position.conditionId);
-      console.log(`   ❌ Max retries (${MAX_RETRY_COUNT}) exceeded for ${position.conditionId.slice(0, 20)}...`);
     }
   } else {
     pendingRetries.delete(position.conditionId);
@@ -1264,30 +1108,11 @@ async function claimPositionWithLogging(position: RedeemablePosition): Promise<C
 }
 
 // ============================================================================
-// PROXY WALLET INSTRUCTIONS
+// PROXY WALLET INSTRUCTIONS (silent - no logging)
 // ============================================================================
 
-function printProxyWalletClaimInstructions(positions: RedeemablePosition[]): void {
-  const totalValue = positions.reduce((sum, p) => sum + (p.currentValue || 0), 0);
-  
-  console.log(`\n${'='.repeat(70)}`);
-  console.log(`⚠️  PROXY WALLET DETECTED - MANUAL CLAIM REQUIRED`);
-  console.log(`${'='.repeat(70)}`);
-  console.log(`\nYour positions are held by a proxy wallet (Safe/Magic).`);
-  console.log(`Polymarket does NOT yet support automated claiming via API for proxy wallets.`);
-  console.log(`\n📋 CLAIMABLE POSITIONS (${positions.length} total, $${totalValue.toFixed(2)} value):`);
-  
-  for (const p of positions) {
-    console.log(`   💰 ${p.outcome} ${p.size.toFixed(0)} shares @ ${p.title?.slice(0, 45)}`);
-    console.log(`      Value: $${p.currentValue?.toFixed(2)}`);
-  }
-  
-  console.log(`\n🔗 TO CLAIM YOUR WINNINGS:`);
-  console.log(`   1. Go to: https://polymarket.com/portfolio`);
-  console.log(`   2. Connect your MetaMask wallet`);
-  console.log(`   3. Click the "Claim" button on each resolved market`);
-  console.log(`\n💡 TIP: Bookmark this page for easy access to claims!`);
-  console.log(`${'='.repeat(70)}\n`);
+function printProxyWalletClaimInstructions(_positions: RedeemablePosition[]): void {
+  // silent - all logging removed
 }
 
 // ============================================================================
@@ -1304,9 +1129,8 @@ export async function checkAndClaimWinnings(): Promise<{ claimed: number; total:
 
     // First, process any pending retries
     const now = Date.now();
-    for (const [conditionId, retry] of pendingRetries) {
+    for (const [_, retry] of pendingRetries) {
       if (retry.nextRetryAt <= now) {
-        console.log(`\n🔄 Processing retry for ${conditionId.slice(0, 20)}...`);
         await claimPositionWithLogging(retry.position);
         await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_CLAIMS_MS));
       }
@@ -1321,16 +1145,13 @@ export async function checkAndClaimWinnings(): Promise<{ claimed: number; total:
     // If proxy wallet mode, show instructions and exit
     if (isProxyWalletMode()) {
       printProxyWalletClaimInstructions(positions);
-      console.log(`\n📊 RESULT: ${positions.length} positions need manual claiming`);
       return { claimed: 0, total: positions.length, totalUSDC: 0 };
     }
 
     // EOA mode - attempt automated claiming in batches
     let claimedCount = 0;
     let totalUSDC = 0;
-    const batch = positions.slice(0, BATCH_SIZE); // Take first batch
-
-    console.log(`\n🚀 Processing batch of ${batch.length} claims...`);
+    const batch = positions.slice(0, BATCH_SIZE);
 
     for (const position of batch) {
       if (confirmedClaims.has(position.conditionId)) continue;
@@ -1348,19 +1169,9 @@ export async function checkAndClaimWinnings(): Promise<{ claimed: number; total:
     }
 
     if (claimedCount > 0) {
-      console.log(`\n🎉 Claimed ${claimedCount} of ${batch.length} positions ($${totalUSDC.toFixed(2)} USDC)`);
-
-      // POST-CLAIM VERIFICATION
-      console.log(`\n🔄 Verifying claims...`);
+      // POST-CLAIM VERIFICATION: wait a bit and re-fetch
       await new Promise(resolve => setTimeout(resolve, 5000));
-      
-      const remainingPositions = await fetchRedeemablePositions();
-      if (remainingPositions.length > 0) {
-        console.log(`⚠️ ${remainingPositions.length} positions still showing as claimable`);
-        console.log(`   This may be due to indexer delay (will retry next cycle)`);
-      } else {
-        console.log(`✅ Verified: all positions claimed`);
-      }
+      await fetchRedeemablePositions();
     }
 
     return { 
@@ -1379,24 +1190,18 @@ export async function checkAndClaimWinnings(): Promise<{ claimed: number; total:
 // ============================================================================
 
 export function startAutoClaimLoop(intervalMs: number = DEFAULT_CLAIM_INTERVAL_MS): void {
-  if (isAutoClaimRunning) {
-    console.log('⚠️ Auto-claim loop already running');
-    return;
-  }
-
-  console.log(`\n🔄 Starting auto-claim loop (interval: ${intervalMs / 1000}s)`);
+  if (isAutoClaimRunning) return;
   isAutoClaimRunning = true;
 
   // Run immediately on start
-  checkAndClaimWinnings().catch(console.error);
+  checkAndClaimWinnings().catch(() => {});
 
   // Then run periodically
   autoClaimInterval = setInterval(async () => {
-    console.log(`\n⏰ Auto-claim check triggered at ${new Date().toISOString()}`);
     try {
       await checkAndClaimWinnings();
-    } catch (error) {
-      console.error('❌ Auto-claim error:', error);
+    } catch {
+      // silent
     }
   }, intervalMs);
 }
@@ -1407,7 +1212,6 @@ export function stopAutoClaimLoop(): void {
     autoClaimInterval = null;
   }
   isAutoClaimRunning = false;
-  console.log('⏹️ Auto-claim loop stopped');
 }
 
 export function isAutoClaimActive(): boolean {
@@ -1478,34 +1282,10 @@ export function getClaimStats(): {
 }
 
 /**
- * Print debug state
+ * Print debug state (silent - no logging)
  */
 export function printDebugState(): void {
-  const stats = getClaimStats();
-  
-  console.log('\n📊 REDEEMER DEBUG STATE:');
-  console.log(`   Confirmed claims: ${stats.confirmed}`);
-  console.log(`   Pending retries: ${stats.pending}`);
-  console.log(`   Total claimed USDC: $${stats.totalClaimedUSDC.toFixed(2)}`);
-  console.log(`   Tx history entries: ${claimTxHistory.length}`);
-  console.log(`   Proxy wallet mode: ${isProxyWalletMode()}`);
-  console.log(`   Auto-claim active: ${isAutoClaimRunning}`);
-  
-  if (confirmedClaims.size > 0) {
-    console.log('\n   Recent confirmed claims:');
-    const recent = [...confirmedClaims.entries()].slice(-5);
-    for (const [conditionId, claim] of recent) {
-      console.log(`   - ${conditionId.slice(0, 20)}...: $${claim.payoutUSDC.toFixed(2)} (block ${claim.blockNumber})`);
-    }
-  }
-  
-  if (pendingRetries.size > 0) {
-    console.log('\n   Pending retries:');
-    for (const [conditionId, retry] of pendingRetries) {
-      const waitTime = Math.max(0, (retry.nextRetryAt - Date.now()) / 1000);
-      console.log(`   - ${conditionId.slice(0, 20)}...: retry ${retry.retryCount}/${MAX_RETRY_COUNT} in ${waitTime.toFixed(0)}s`);
-    }
-  }
+  // silent - all logging removed
 }
 
 /**
@@ -1515,5 +1295,4 @@ export function clearState(): void {
   confirmedClaims.clear();
   pendingRetries.clear();
   claimTxHistory.length = 0;
-  console.log('🧹 Redeemer state cleared');
 }
