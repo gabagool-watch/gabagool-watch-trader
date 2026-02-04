@@ -628,8 +628,8 @@ async function cleanupExpiredMarkets(): Promise<boolean> {
       // V35.7.0: Cancel any pending expiry snapshot (though it should have fired already)
       cancelExpirySnapshot(slug);
       
-      // V37.4.0: Cancel any pending merge (though it should have fired already)
-      cancelMerge(slug);
+      // V37.6.3: DO NOT cancel merge here - merge fires 30s AFTER expiry!
+      // The merge will execute and then clean itself up
       
       markets.delete(slug);
       removed++;
@@ -1322,7 +1322,7 @@ async function main(): Promise<void> {
   // V37.4.0: Initialize merge scheduler
   const mergeReady = await initMergeScheduler();
   if (mergeReady) {
-    log('🔄 Merge scheduler initialized - will merge 10s before expiry');
+    log('🔄 Merge scheduler initialized - will merge 30s AFTER expiry');
     
     // Configure merge callback to track results
     setMergeCallback((slug, result) => {
