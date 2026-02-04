@@ -381,7 +381,7 @@ async function handleFillFromUserWs(fill: V35Fill): Promise<void> {
       unpairedNotionalUsd: unpaired * 0.50, // Rough estimate at midpoint
       pairCost,
       state,
-      triggerType: hedgeResult?.hedged ? 'HEDGE' : 'FILL',
+      triggerType: 'FILL',
     };
     
     saveV35InventorySnapshot(snapshot).catch(err => {
