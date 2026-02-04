@@ -95,3 +95,9 @@ verify_jwt = false
 
 [functions.price-feed-logger]
 verify_jwt = false
+
+[functions.market-analysis-export]
+verify_jwt = false
+
+[functions.data-export-lovable]
+verify_jwt = false
