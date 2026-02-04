@@ -1,30 +1,30 @@
 // ============================================================
 // V37 PAIR TRACKER - PER-PAIR MAKER APPROACH
 // ============================================================
-// Version: V37.5.0 - "Hedge Capacity Check"
+// Version: V37.6.0 - "Smart Maker Placement"
 //
 // STRATEGY:
 // 1. Every 5 seconds: check if expensive side is 3-97c
 // 2. Buy expensive side as TAKER (FOK)
-// 3. Immediately place MAKER on cheap side with 5c margin
-// 4. Maker fill = hedge complete
-// 5. Max 10 concurrent open pairs
+// 3. Check if "free" shares exist on cheap side (unpaired excess)
+// 4. If free shares >= taker size: NO MAKER NEEDED (instant pair!)
+// 5. If free shares < taker size: Place MAKER for the DIFFERENCE only
+// 6. Max 10 concurrent open pairs
+//
+// V37.6.0: SMART MAKER PLACEMENT
+// - Tracks "free" shares = cheapQty - expensiveQty (excess on cheap side)
+// - Free shares are automatically paired with new taker buys
+// - Only places maker orders when there's a SHORTAGE on cheap side
+// - Respects $1 minimum order value for makers
+//
+// Example flow:
+// 1. Buy 10 UP @ 90c → Must hedge with 20 DOWN @ 5c ($1 min)
+// 2. Now: UP=10, DOWN=20 → 10 "free" DOWN shares
+// 3. Next: Buy 10 UP → Use the 10 free DOWN, NO MAKER NEEDED
+// 4. Now: UP=20, DOWN=20 → 0 free shares (all paired)
 //
 // PRICE GUARD: Only trade when expensive side is 3-97c
 // MIN ORDER: $1 minimum for both taker AND maker
-//
-// V37.5.0: HEDGE CAPACITY CHECK
-// - Before opening a pair, check how many shares can be hedged on cheap side
-// - Clamp taker size to hedge capacity (prevents unhedgeable positions)
-// - Block trades when cheap side is at 100 shares
-//
-// V36 FEATURES PRESERVED:
-// - Per-pair accounting with P&L tracking
-// - Fill logging to database (TAKER + MAKER)
-// - Order reconciliation support
-// - Expiry snapshot support
-// - Fill audit fallback (REST API polling)
-// - $1 minimum order value
 // ============================================================
 
 import type { V35Market, V35Side, V35Asset, V35Fill } from './types.js';
@@ -228,17 +228,20 @@ export class PairTracker {
   // ============================================================
   
   /**
-   * Get available hedge capacity for a market
-   * Returns how many shares can still be hedged on the cheap side
+   * V37.6.0: Get "free" shares on cheap side that can be used for pairing
    * 
-   * V37.5.0: Prevents buying more expensive shares than can be hedged
+   * FREE SHARES = cheapQty - expensiveQty (the excess on cheap side)
+   * 
+   * Example:
+   * - UP=10, DOWN=20 → freeDown = 20-10 = 10 (these can pair with next UP buys)
+   * - UP=20, DOWN=20 → freeDown = 0 (all paired, need new maker)
+   * - UP=30, DOWN=20 → freeDown = 0, freeUp = 10 (imbalanced the other way)
    */
-  getAvailableHedgeCapacity(market: V35Market, cheapSide: V35Side): number {
-    // Get current positions
+  getFreeSharesOnCheapSide(market: V35Market, cheapSide: V35Side): number {
     const cheapQty = cheapSide === 'UP' ? market.upQty : market.downQty;
     const expensiveQty = cheapSide === 'UP' ? market.downQty : market.upQty;
     
-    // Calculate pending makers that haven't filled yet
+    // Also count pending makers that haven't filled yet (they're "reserved")
     const pendingMakerShares = Array.from(this.pairs.values())
       .filter(p => 
         p.marketSlug === market.slug && 
@@ -247,16 +250,38 @@ export class PairTracker {
       )
       .reduce((sum, p) => sum + (p.makerSize - (p.makerFilledSize || 0)), 0);
     
-    // Effective cheap side = current + pending makers
+    // Effective cheap side = current positions + pending makers
     const effectiveCheapQty = cheapQty + pendingMakerShares;
     
-    // Available = 100 (max per side) - effectiveCheapQty - some buffer
+    // Free shares = excess on cheap side (can be used for new pairs)
+    const freeShares = Math.max(0, effectiveCheapQty - expensiveQty);
+    
+    console.log(`[PairTracker] 📊 FREE SHARES: ${cheapSide}=${effectiveCheapQty.toFixed(0)} (pos=${cheapQty.toFixed(0)} + pending=${pendingMakerShares.toFixed(0)}) - expensive=${expensiveQty.toFixed(0)} → ${freeShares.toFixed(0)} free`);
+    
+    return freeShares;
+  }
+  
+  /**
+   * Get remaining capacity on cheap side (max 100 per side)
+   * Returns how many MORE shares can be added to cheap side
+   */
+  getRemainingCapacity(market: V35Market, cheapSide: V35Side): number {
+    const cheapQty = cheapSide === 'UP' ? market.upQty : market.downQty;
+    
+    // Count pending makers
+    const pendingMakerShares = Array.from(this.pairs.values())
+      .filter(p => 
+        p.marketSlug === market.slug && 
+        p.status === 'WAITING_HEDGE' &&
+        p.makerSide === cheapSide
+      )
+      .reduce((sum, p) => sum + (p.makerSize - (p.makerFilledSize || 0)), 0);
+    
+    const effectiveCheapQty = cheapQty + pendingMakerShares;
     const maxPerSide = 100;
-    const available = Math.max(0, maxPerSide - effectiveCheapQty);
+    const remaining = Math.max(0, maxPerSide - effectiveCheapQty);
     
-    console.log(`[PairTracker] 📊 Hedge capacity: ${cheapSide}=${effectiveCheapQty.toFixed(0)} (current ${cheapQty.toFixed(0)} + pending ${pendingMakerShares.toFixed(0)}) → ${available.toFixed(0)} available`);
-    
-    return available;
+    return remaining;
   }
   
   /**
@@ -297,9 +322,17 @@ export class PairTracker {
   }
   
   /**
-   * Open a new pair: buy expensive side as taker, place maker on cheap side
+   * Open a new pair: buy expensive side as taker, optionally place maker on cheap side
    * 
-   * V37.5.0: Checks hedge capacity to prevent buying more shares than can be hedged
+   * V37.6.0: SMART MAKER PLACEMENT
+   * - Check how many "free" shares exist on cheap side (excess that can pair with new takers)
+   * - If free >= taker size: NO new maker needed, those shares will pair automatically
+   * - If free < taker size: Place maker for the DIFFERENCE only
+   * 
+   * Example:
+   * 1. UP=10, DOWN=20 (10 free DOWN) → Buy 10 UP, no maker needed
+   * 2. UP=20, DOWN=20 (0 free) → Buy 10 UP, place maker for 20 DOWN @ 5c ($1 min)
+   * 3. UP=25, DOWN=40 (15 free DOWN) → Buy 10 UP, no maker needed
    */
   async openPair(
     market: V35Market,
@@ -314,14 +347,13 @@ export class PairTracker {
       return { success: false, error: 'only_btc' };
     }
     
-    // Determine sides early for capacity check
+    // Determine sides early
     const cheapSide: V35Side = expensiveSide === 'UP' ? 'DOWN' : 'UP';
     
     // Get expensive price
     const expensiveAsk = expensiveSide === 'UP' ? market.upBestAsk : market.downBestAsk;
     
     // PRICE GUARD: Check BOTH sides are within 3-97c range
-    // This prevents trades at extreme prices like 1c or 99c
     if (!this.isPriceAcceptable(expensiveAsk)) {
       console.log(`[PairTracker] 🛑 PRICE GUARD: ${expensiveSide} @ $${expensiveAsk.toFixed(2)} outside 3-97c range`);
       return { success: false, error: 'price_outside_range' };
@@ -335,17 +367,12 @@ export class PairTracker {
     }
     
     // =========================================================================
-    // V37.5.0: CHECK HEDGE CAPACITY BEFORE BUYING
+    // V37.6.0: CHECK FREE SHARES + REMAINING CAPACITY
     // =========================================================================
-    // Check how many shares can still be hedged on the cheap side
-    // This prevents buying more expensive shares than we can pair
-    // =========================================================================
-    const hedgeCapacity = this.getAvailableHedgeCapacity(market, cheapSide);
+    const freeShares = this.getFreeSharesOnCheapSide(market, cheapSide);
+    const remainingCapacity = this.getRemainingCapacity(market, cheapSide);
     
-    if (hedgeCapacity <= 0) {
-      console.log(`[PairTracker] 🛑 NO HEDGE CAPACITY: ${cheapSide} side is full (100 shares)`);
-      return { success: false, error: 'no_hedge_capacity' };
-    }
+    console.log(`[PairTracker] 📊 FREE: ${freeShares.toFixed(0)} ${cheapSide} | REMAINING CAP: ${remainingCapacity.toFixed(0)}`);
     
     // Check if we can open (cooldown + max pairs)
     if (!this.canOpenNewPair()) {
@@ -362,38 +389,67 @@ export class PairTracker {
       strikePrice
     );
     
-    // Calculate sizes ensuring $1 minimum for BOTH sides
+    // Calculate taker size (respecting $1 minimum)
     let takerSize = this.calculateOrderSize(baseSize, expensiveAsk);
     
     // =========================================================================
-    // V37.5.0: CLAMP SIZE TO HEDGE CAPACITY
+    // V37.6.0: CALCULATE REQUIRED MAKER SIZE
     // =========================================================================
-    // Don't buy more expensive shares than we can hedge on the cheap side
+    // Only need to place maker for shares NOT covered by free shares
     // =========================================================================
-    if (takerSize > hedgeCapacity) {
-      console.log(`[PairTracker] ⚠️ CLAMPING: ${takerSize} → ${hedgeCapacity} (hedge capacity limit)`);
-      takerSize = hedgeCapacity;
+    let requiredMakerShares = Math.max(0, takerSize - freeShares);
+    let actualMakerSize = 0;
+    let needsMaker = false;
+    
+    if (requiredMakerShares > 0) {
+      // Need to place maker - calculate size with $1 minimum
+      actualMakerSize = this.calculateOrderSize(requiredMakerShares, makerPrice);
+      needsMaker = true;
+      
+      // Check if we have capacity for the maker
+      if (actualMakerSize > remainingCapacity) {
+        if (remainingCapacity <= 0) {
+          console.log(`[PairTracker] 🛑 NO CAPACITY: ${cheapSide} side is full (100 shares)`);
+          return { success: false, error: 'no_capacity' };
+        }
+        // Clamp to remaining capacity
+        actualMakerSize = remainingCapacity;
+        console.log(`[PairTracker] ⚠️ CLAMPING maker to ${actualMakerSize} (capacity limit)`);
+        
+        // Recalculate how many takers we can actually do
+        // Total cheap shares available = freeShares + actualMakerSize
+        const totalCheapAvailable = freeShares + actualMakerSize;
+        if (takerSize > totalCheapAvailable) {
+          takerSize = Math.floor(totalCheapAvailable);
+          console.log(`[PairTracker] ⚠️ CLAMPING taker to ${takerSize} (matching capacity)`);
+        }
+      }
+    } else {
+      // Enough free shares - no maker needed!
+      console.log(`[PairTracker] ✨ FREE SHARES: ${freeShares.toFixed(0)} >= ${takerSize} needed → NO MAKER NEEDED`);
     }
     
-    // Ensure we still meet minimum order value after clamping
-    const orderValue = takerSize * expensiveAsk;
-    if (orderValue < MIN_ORDER_VALUE_USD) {
-      console.log(`[PairTracker] 🛑 ORDER TOO SMALL after capacity clamp: $${orderValue.toFixed(2)} < $${MIN_ORDER_VALUE_USD}`);
-      return { success: false, error: 'clamped_order_too_small' };
+    // Ensure taker still meets minimum order value
+    const takerOrderValue = takerSize * expensiveAsk;
+    if (takerOrderValue < MIN_ORDER_VALUE_USD) {
+      console.log(`[PairTracker] 🛑 TAKER TOO SMALL: $${takerOrderValue.toFixed(2)} < $${MIN_ORDER_VALUE_USD}`);
+      return { success: false, error: 'taker_order_too_small' };
     }
-    
-    const makerSize = this.calculateOrderSize(takerSize, makerPrice);
     
     // Create pair ID
     const pairId = `pair_${Date.now()}_${++this.pairCounter}`;
-    const targetCpp = expensiveAsk + makerPrice;
+    const targetCpp = expensiveAsk + (needsMaker ? makerPrice : 0);
     
     console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
     console.log(`[PairTracker] 🟠 OPENING ${pairId}`);
     console.log(`[PairTracker]    TAKER: ${takerSize} ${expensiveSide} @ ~$${expensiveAsk.toFixed(2)}`);
-    console.log(`[PairTracker]    MAKER: ${makerSize} ${cheapSide} @ $${makerPrice.toFixed(2)} (margin: ${(marginUsed * 100).toFixed(0)}c)`);
-    console.log(`[PairTracker]    TARGET CPP: $${targetCpp.toFixed(2)}`);
-    console.log(`[PairTracker]    HEDGE CAPACITY: ${hedgeCapacity} shares available on ${cheapSide}`);
+    if (needsMaker) {
+      console.log(`[PairTracker]    MAKER: ${actualMakerSize} ${cheapSide} @ $${makerPrice.toFixed(2)} (margin: ${(marginUsed * 100).toFixed(0)}c)`);
+      console.log(`[PairTracker]    TARGET CPP: $${targetCpp.toFixed(2)}`);
+    } else {
+      console.log(`[PairTracker]    MAKER: SKIPPED (${freeShares.toFixed(0)} free ${cheapSide} shares available)`);
+      console.log(`[PairTracker]    MODE: INSTANT PAIR (using existing inventory)`);
+    }
     if (volatilityInfo) {
       console.log(`[PairTracker]    VOLATILITY: ${volatilityInfo}`);
     }
@@ -416,8 +472,8 @@ export class PairTracker {
       takerSize,
       
       makerSide: cheapSide,
-      makerPrice,
-      makerSize,
+      makerPrice: needsMaker ? makerPrice : 0,
+      makerSize: actualMakerSize,
       
       status: 'PENDING_ENTRY',
       createdAt: Date.now(),
@@ -494,20 +550,59 @@ export class PairTracker {
     }
     
     // =========================================================================
-    // STEP 2: PLACE MAKER (GTC)
+    // STEP 2: PLACE MAKER (GTC) - ONLY IF NEEDED
     // =========================================================================
+    if (!needsMaker) {
+      // No maker needed - mark as already hedged (using free shares)
+      pair.status = 'HEDGED';
+      pair.makerFilledAt = Date.now();
+      pair.makerFilledPrice = 0; // No cost for using free shares
+      pair.makerFilledSize = 0;
+      pair.actualCpp = pair.takerFilledPrice; // Only paid for taker
+      pair.pnl = pair.takerFilledSize! * (1 - pair.actualCpp); // Profit = shares * (1 - cpp)
+      
+      console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+      console.log(`[PairTracker] ✅ INSTANT PAIR: ${pairId}`);
+      console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${pair.takerSide} @ $${pair.takerFilledPrice?.toFixed(3)} ✓`);
+      console.log(`[PairTracker]    MAKER: FREE (used existing ${cheapSide} inventory)`);
+      console.log(`[PairTracker]    CPP: $${pair.actualCpp?.toFixed(3)} | P&L: $${pair.pnl?.toFixed(2)}`);
+      console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
+      
+      logPairEvent({
+        pairId,
+        eventType: 'pair_instant_hedged',
+        marketSlug: market.slug,
+        asset: market.asset,
+        takerSide: pair.takerSide,
+        takerPrice: pair.takerFilledPrice || 0,
+        takerSize: pair.takerFilledSize || 0,
+        makerSide: cheapSide,
+        makerPrice: 0,
+        makerSize: 0,
+        cpp: pair.actualCpp,
+        pnl: pair.pnl,
+        status: 'HEDGED',
+        note: `Used ${freeShares.toFixed(0)} free ${cheapSide} shares`,
+      }).catch(() => {});
+      
+      return { success: true, pairId };
+    }
+    
+    // Need to place maker
     try {
       // Recalculate maker size based on actual taker fill
-      const actualMakerSize = this.calculateOrderSize(pair.takerFilledSize!, makerPrice);
-      pair.makerSize = actualMakerSize;
+      const actualTakerFilled = pair.takerFilledSize!;
+      const requiredMakerForTaker = Math.max(0, actualTakerFilled - freeShares);
+      const finalMakerSize = this.calculateOrderSize(requiredMakerForTaker, makerPrice);
+      pair.makerSize = finalMakerSize;
       
-      console.log(`[PairTracker] 📝 MAKER: ${actualMakerSize} ${cheapSide} @ $${makerPrice.toFixed(3)} (GTC)`);
+      console.log(`[PairTracker] 📝 MAKER: ${finalMakerSize} ${cheapSide} @ $${makerPrice.toFixed(3)} (GTC)`);
       
       const makerResult = await placeOrder({
         tokenId: makerTokenId,
         side: 'BUY',
         price: makerPrice,
-        size: actualMakerSize,
+        size: finalMakerSize,
         orderType: 'GTC',
       });
       
@@ -528,8 +623,8 @@ export class PairTracker {
       
       console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
       console.log(`[PairTracker] ✅ PAIR OPENED: ${pairId}`);
-      console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${expensiveSide} @ $${pair.takerFilledPrice?.toFixed(3)} ✓`);
-      console.log(`[PairTracker]    MAKER: ${actualMakerSize} ${cheapSide} @ $${makerPrice.toFixed(3)} (open)`);
+      console.log(`[PairTracker]    TAKER: ${pair.takerFilledSize} ${pair.takerSide} @ $${pair.takerFilledPrice?.toFixed(3)} ✓`);
+      console.log(`[PairTracker]    MAKER: ${finalMakerSize} ${cheapSide} @ $${makerPrice.toFixed(3)} (open)`);
       console.log(`[PairTracker]    PROJECTED CPP: $${pair.targetCpp.toFixed(3)}`);
       console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
       
@@ -539,12 +634,12 @@ export class PairTracker {
         eventType: 'pair_opened',
         marketSlug: market.slug,
         asset: market.asset,
-        takerSide: expensiveSide,
+        takerSide: pair.takerSide,
         takerPrice: pair.takerFilledPrice || 0,
         takerSize: pair.takerFilledSize || 0,
         makerSide: cheapSide,
         makerPrice,
-        makerSize: actualMakerSize,
+        makerSize: finalMakerSize,
         status: 'WAITING_HEDGE',
       }).catch(() => {});
       
