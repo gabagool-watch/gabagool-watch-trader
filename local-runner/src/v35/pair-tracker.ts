@@ -1,7 +1,7 @@
 // ============================================================
 // V37 PAIR TRACKER - PER-PAIR MAKER APPROACH
 // ============================================================
-// Version: V37.2.0 - "Per-Pair Makers with V36 Features"
+// Version: V37.5.0 - "Hedge Capacity Check"
 //
 // STRATEGY:
 // 1. Every 5 seconds: check if expensive side is 3-97c
@@ -12,6 +12,11 @@
 //
 // PRICE GUARD: Only trade when expensive side is 3-97c
 // MIN ORDER: $1 minimum for both taker AND maker
+//
+// V37.5.0: HEDGE CAPACITY CHECK
+// - Before opening a pair, check how many shares can be hedged on cheap side
+// - Clamp taker size to hedge capacity (prevents unhedgeable positions)
+// - Block trades when cheap side is at 100 shares
 //
 // V36 FEATURES PRESERVED:
 // - Per-pair accounting with P&L tracking
@@ -223,6 +228,38 @@ export class PairTracker {
   // ============================================================
   
   /**
+   * Get available hedge capacity for a market
+   * Returns how many shares can still be hedged on the cheap side
+   * 
+   * V37.5.0: Prevents buying more expensive shares than can be hedged
+   */
+  getAvailableHedgeCapacity(market: V35Market, cheapSide: V35Side): number {
+    // Get current positions
+    const cheapQty = cheapSide === 'UP' ? market.upQty : market.downQty;
+    const expensiveQty = cheapSide === 'UP' ? market.downQty : market.upQty;
+    
+    // Calculate pending makers that haven't filled yet
+    const pendingMakerShares = Array.from(this.pairs.values())
+      .filter(p => 
+        p.marketSlug === market.slug && 
+        p.status === 'WAITING_HEDGE' &&
+        p.makerSide === cheapSide
+      )
+      .reduce((sum, p) => sum + (p.makerSize - (p.makerFilledSize || 0)), 0);
+    
+    // Effective cheap side = current + pending makers
+    const effectiveCheapQty = cheapQty + pendingMakerShares;
+    
+    // Available = 100 (max per side) - effectiveCheapQty - some buffer
+    const maxPerSide = 100;
+    const available = Math.max(0, maxPerSide - effectiveCheapQty);
+    
+    console.log(`[PairTracker] 📊 Hedge capacity: ${cheapSide}=${effectiveCheapQty.toFixed(0)} (current ${cheapQty.toFixed(0)} + pending ${pendingMakerShares.toFixed(0)}) → ${available.toFixed(0)} available`);
+    
+    return available;
+  }
+  
+  /**
    * Check if we can open a new pair
    */
   canOpenNewPair(): boolean {
@@ -261,6 +298,8 @@ export class PairTracker {
   
   /**
    * Open a new pair: buy expensive side as taker, place maker on cheap side
+   * 
+   * V37.5.0: Checks hedge capacity to prevent buying more shares than can be hedged
    */
   async openPair(
     market: V35Market,
@@ -274,6 +313,9 @@ export class PairTracker {
     if (market.asset !== 'BTC') {
       return { success: false, error: 'only_btc' };
     }
+    
+    // Determine sides early for capacity check
+    const cheapSide: V35Side = expensiveSide === 'UP' ? 'DOWN' : 'UP';
     
     // Get expensive price
     const expensiveAsk = expensiveSide === 'UP' ? market.upBestAsk : market.downBestAsk;
@@ -292,15 +334,26 @@ export class PairTracker {
       return { success: false, error: 'maker_price_outside_range' };
     }
     
-    // Check if we can open
+    // =========================================================================
+    // V37.5.0: CHECK HEDGE CAPACITY BEFORE BUYING
+    // =========================================================================
+    // Check how many shares can still be hedged on the cheap side
+    // This prevents buying more expensive shares than we can pair
+    // =========================================================================
+    const hedgeCapacity = this.getAvailableHedgeCapacity(market, cheapSide);
+    
+    if (hedgeCapacity <= 0) {
+      console.log(`[PairTracker] 🛑 NO HEDGE CAPACITY: ${cheapSide} side is full (100 shares)`);
+      return { success: false, error: 'no_hedge_capacity' };
+    }
+    
+    // Check if we can open (cooldown + max pairs)
     if (!this.canOpenNewPair()) {
       return { success: false, error: 'cooldown_or_max_pairs' };
     }
     
     // Set cooldown immediately
     this.lastPairOpenedAt = Date.now();
-    
-    const cheapSide: V35Side = expensiveSide === 'UP' ? 'DOWN' : 'UP';
     
     // Calculate maker price with optional volatility adjustment
     const { makerPrice, marginUsed, volatilityInfo } = this.calculateMakerPrice(
@@ -310,7 +363,25 @@ export class PairTracker {
     );
     
     // Calculate sizes ensuring $1 minimum for BOTH sides
-    const takerSize = this.calculateOrderSize(baseSize, expensiveAsk);
+    let takerSize = this.calculateOrderSize(baseSize, expensiveAsk);
+    
+    // =========================================================================
+    // V37.5.0: CLAMP SIZE TO HEDGE CAPACITY
+    // =========================================================================
+    // Don't buy more expensive shares than we can hedge on the cheap side
+    // =========================================================================
+    if (takerSize > hedgeCapacity) {
+      console.log(`[PairTracker] ⚠️ CLAMPING: ${takerSize} → ${hedgeCapacity} (hedge capacity limit)`);
+      takerSize = hedgeCapacity;
+    }
+    
+    // Ensure we still meet minimum order value after clamping
+    const orderValue = takerSize * expensiveAsk;
+    if (orderValue < MIN_ORDER_VALUE_USD) {
+      console.log(`[PairTracker] 🛑 ORDER TOO SMALL after capacity clamp: $${orderValue.toFixed(2)} < $${MIN_ORDER_VALUE_USD}`);
+      return { success: false, error: 'clamped_order_too_small' };
+    }
+    
     const makerSize = this.calculateOrderSize(takerSize, makerPrice);
     
     // Create pair ID
@@ -322,6 +393,7 @@ export class PairTracker {
     console.log(`[PairTracker]    TAKER: ${takerSize} ${expensiveSide} @ ~$${expensiveAsk.toFixed(2)}`);
     console.log(`[PairTracker]    MAKER: ${makerSize} ${cheapSide} @ $${makerPrice.toFixed(2)} (margin: ${(marginUsed * 100).toFixed(0)}c)`);
     console.log(`[PairTracker]    TARGET CPP: $${targetCpp.toFixed(2)}`);
+    console.log(`[PairTracker]    HEDGE CAPACITY: ${hedgeCapacity} shares available on ${cheapSide}`);
     if (volatilityInfo) {
       console.log(`[PairTracker]    VOLATILITY: ${volatilityInfo}`);
     }
