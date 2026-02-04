@@ -21,8 +21,8 @@
 // This ensures imbalances are FIXED, not abandoned via bans.
 // ============================================================
 
-export const V35_VERSION = 'V36.14.0';
-export const V35_CODENAME = 'Instant Market Transition';
+export const V35_VERSION = 'V37.0.0';
+export const V35_CODENAME = 'Back to Basics';
 
 export type V35Mode = 'test' | 'moderate' | 'production';
 

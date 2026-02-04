@@ -1,43 +1,15 @@
 // ============================================================
-// V36 RUNNER - PAIR-BASED MARKET MAKING
+// V37 RUNNER - BACK TO BASICS
 // ============================================================
-// Version: V36.11.0 - "Instant Market Transition"
-// Version: V36.10.0 - "Dynamic CPP Escalation"
-// Version: V36.4.3 - "Fill Audit Fallback"
+// Version: V37.0.0 - "Back to Basics"
 //
-// V36.11.0 KEY CHANGES (CRITICAL BUG FIX):
-// - FIX: Instant market transition when current market expires
-// - Runner now immediately searches for next market (no 60s delay!)
-// - cleanupExpiredMarkets() is now async and calls refreshMarkets(true)
-// - forceSearch=true bypasses maxMarkets check after market expiry
+// SUPER SIMPLE STRATEGY:
+// 1. Every 5 seconds: buy expensive side as TAKER
+// 2. Immediately place MAKER limit at: 100 - takerPrice - 5c
+// 3. Max 10 pairs open (WAITING_HEDGE status)
+// 4. No reversals, no guards, no complexity
 //
-// V36.10.0 KEY CHANGES:
-// - Dynamic CPP Escalation: Maker prices escalate over time (0.93 → 1.00)
-// - Guarantees hedging even at break-even rather than risking reversal loss
-// - Schedule: 0s→0.93, 30s→0.95, 60s→0.97, 90s→0.99, 120s→1.00
-//
-// V36.3.6 KEY CHANGES:
-// - FIX: Reset pairs when market expires to prevent stale pairs blocking new trades
-// - Pairs for expired markets are marked EXPIRED and deleted
-// - Market start times are cleared to allow proper startup delay for new markets
-//
-// V36 STRATEGY SUMMARY (Taker-Maker Pair Trading)
-// ============================================================
-// 1. TAKER on expensive side: 10 shares market order
-// 2. MAKER on cheap side: 10 shares limit @ (targetCpp - takerFillPrice)
-// 3. Pairs are tracked - orders are NOT cancelled
-// 4. Exception: Binance reversal ($30 move) triggers emergency hedge
-// 5. Minimum order value: $1.00 - size adjusted at low prices
-//
-// INVARIANT: expensive_side_shares >= cheap_side_shares
-// (taker fills first, maker waits for fill)
-// ============================================================
-//
-// DISABLED LEGACY COMPONENTS:
-// - Circuit Breaker (V35 inventory guards)
-// - ProactiveRebalancer (V35 auto-buying lagging side)
-// - EmergencyRecovery (V35 auto-buying lagging side)
-// - HedgeManager auto-hedging on fills
+// That's it. Simple market making.
 // ============================================================
 
 import '../config.js'; // Load env first
@@ -355,7 +327,7 @@ function processWsEvent(data: any): void {
 
 /**
  * Handle fills received from the authenticated User WebSocket
- * V36.1: Now also updates PairTracker for pair-based lifecycle
+ * V37: Simplified - just update pair tracker
  */
 async function handleFillFromUserWs(fill: V35Fill): Promise<void> {
   const market = markets.get(fill.marketSlug);
@@ -366,61 +338,18 @@ async function handleFillFromUserWs(fill: V35Fill): Promise<void> {
 
   log(`🎯 [UserWS] FILL: ${fill.side} ${fill.size.toFixed(0)} @ $${fill.price.toFixed(2)} in ${fill.marketSlug.slice(-25)}`);
   
-  // V36.1: Check if this fill belongs to a tracked pair
+  // V37: Update pair tracker with the fill
   const pairTracker = getPairTracker();
-  const { pairUpdated, pair } = await pairTracker.onFill(fill, market);
-  const isPairFill = !!(pairUpdated && pair);
+  pairTracker.onFill(fill);
   
-  if (isPairFill && pair) {
-    log(`   📦 Pair ${pair.id} updated: ${pair.status}`);
-    if (pair.actualCpp) {
-      log(`   💰 CPP: $${pair.actualCpp.toFixed(3)} | P&L: $${(pair.pnl || 0).toFixed(2)}`);
-    }
-  }
-  
-  // =========================================================================
-  // V36.2: ALL FILLS GO THROUGH INVENTORY-ONLY UPDATE
-  // =========================================================================
-  // In V36.2 pair-based mode, the PairTracker handles ALL hedging.
-  // Legacy HedgeManager IOC hedges are disabled because they would place
-  // orders outside the pair tracking system, breaking the invariant.
-  // 
-  // ALL fills (pair or not) should only update inventory, not auto-hedge.
-  // =========================================================================
-  let processed = false;
-  let hedgeResult: any = undefined;
-  
-  // V36.2: Always use inventory-only processing, no legacy auto-hedge
-  processed = processFillInventoryOnly(fill, market);
-  
-  // Update pair tracker if this is a pair fill
-  if (isPairFill && pair) {
-    // Pair status already updated in pairTracker.onFill() above
-  }
+  // Update local inventory tracking
+  const processed = processFillInventoryOnly(fill, market);
   
   if (processed) {
-    // Persist original fill to database
+    // Persist fill to database
     saveV35Fill(fill).catch(err => {
       logError('Failed to save fill:', err);
     });
-    
-    // If hedge was successful, also persist the hedge fill
-    if (hedgeResult?.hedged && hedgeResult.filledQty && hedgeResult.avgPrice) {
-      const hedgeSide = fill.side === 'UP' ? 'DOWN' : 'UP';
-      const hedgeFill: V35Fill = {
-        orderId: `HEDGE_${fill.orderId}`,
-        tokenId: hedgeSide === 'UP' ? market.upTokenId : market.downTokenId,
-        side: hedgeSide,
-        price: hedgeResult.avgPrice,
-        size: hedgeResult.filledQty,
-        timestamp: new Date(),
-        marketSlug: market.slug,
-        asset: market.asset,
-      };
-      saveV35Fill(hedgeFill).catch(err => {
-        logError('Failed to save hedge fill:', err);
-      });
-    }
     
     // Remove the filled order from our tracking (if we know about it)
     const currentOrders = fill.side === 'UP' ? market.upOrders : market.downOrders;
@@ -867,60 +796,21 @@ async function processMarket(market: V35Market): Promise<void> {
   });
   
   // =========================================================================
-  // V36.1: REVERSAL DETECTOR - CHECK FOR BINANCE REVERSALS
-  // =========================================================================
-  // This runs on every market tick and checks if Binance is signaling a reversal.
-  // If detected, it triggers emergency hedges on pending pairs.
-  // =========================================================================
-  const reversalDetector = getReversalDetector();
-  const reversalResult = await reversalDetector.checkForReversals(market);
-  
-  if (reversalResult.reversalDetected) {
-    log(`🚨 REVERSAL DETECTED: Binance ${market.asset} reversing!`);
-    if (reversalResult.emergencyTriggered) {
-      log(`   ✅ Emergency hedge triggered`);
-    } else {
-      log(`   ⚠️ Emergency hedge failed: ${reversalResult.reason || 'unknown'}`);
-    }
-  }
-  
-  // =========================================================================
-  // V36.1: PAIR TRACKER - CHECK TIMEOUTS
-  // V36.4.3: FILL AUDIT FALLBACK - Poll API for missed WebSocket fills
-  // V36.10: CPP ESCALATION - Raise maker prices over time for guaranteed hedging
+  // V37: SIMPLE PAIR OPENING - NO REVERSALS, NO GUARDS, NO COMPLEXITY
   // =========================================================================
   const pairTracker = getPairTracker();
-  await pairTracker.checkTimeouts(market);
   
-  // V36.4.3: Audit WAITING_HEDGE pairs for missed fills every tick
-  await pairTracker.auditMakerFills(market);
-  
-  // V36.10: Check and escalate maker order prices as time passes
-  // This guarantees hedging by raising CPP from 0.93 → 0.95 → 0.97 → 0.99 → 1.00
-  const escalationResult = await pairTracker.checkCppEscalation(market);
-  if (escalationResult.escalated > 0) {
-    log(`   📈 V36.10: Escalated ${escalationResult.escalated}/${escalationResult.checked} maker orders to higher CPP`);
-  }
-  
-  // Log pair tracker stats periodically
-  const pairStats = pairTracker.getStats();
-  if (pairStats.activePairs > 0 || pairStats.completedPairs > 0) {
-    log(`   📦 Pairs: ${pairStats.activePairs} active | ${pairStats.completedPairs} completed | P&L: $${pairStats.totalPnl.toFixed(2)}`);
-  }
+  // Log pair stats
+  const waitingPairs = pairTracker.getWaitingPairs().length;
+  log(`   📦 V37 Pairs: ${waitingPairs}/10 WAITING_HEDGE`);
   
   // Calculate metrics
   const metrics = calculateMarketMetrics(market);
   
   // Log status
-  const ratio = (metrics.upQty > 0 && metrics.downQty > 0)
-    ? (metrics.upQty > metrics.downQty ? metrics.upQty / metrics.downQty : metrics.downQty / metrics.upQty)
-    : 0;
-  const ratioWarn = ratio > config.maxImbalanceRatio ? ` 🔴RATIO:${ratio.toFixed(1)}:1` : '';
-  
-  // Get momentum state for this asset
   const binanceFeed = getBinanceFeed();
-  const momentum = binanceFeed.getMomentum(market.asset);
-  const trend = binanceFeed.getTrendDirection(market.asset);
+  const momentum = binanceFeed?.getMomentum(market.asset) || 0;
+  const trend = binanceFeed?.getTrendDirection(market.asset) || 'FLAT';
   const trendIndicator = trend === 'UP' ? '📈' : trend === 'DOWN' ? '📉' : '➡️';
   
   log(
@@ -928,117 +818,48 @@ async function processMarket(market: V35Market): Promise<void> {
     `UP:${metrics.upQty.toFixed(0)} DOWN:${metrics.downQty.toFixed(0)} | ` +
     `Cost:$${(metrics.upCost + metrics.downCost).toFixed(0)} | ` +
     `CPP:$${metrics.combinedCost.toFixed(3)} | ` +
-    `${trendIndicator}${momentum.toFixed(2)}%${ratioWarn}`
+    `${trendIndicator}${momentum.toFixed(2)}%`
   );
   
-  // Sync orders if not paused
-  if (!paused) {
-    // =========================================================================
-    // V36.2: PAIR-BASED ENTRY LOGIC - TAKER ALWAYS EXECUTES
-    // =========================================================================
-    // STRATEGY:
-    // 1. Identify expensive side (higher ask = likely winner)
-    // 2. ALWAYS place TAKER on expensive side (no CPP check!)
-    // 3. After taker fills, place MAKER at: targetCpp - fillPrice
-    //
-    // V36.2 CHANGES:
-    // - NO pre-entry CPP check - taker is ALWAYS placed
-    // - Maker price calculated AFTER fill based on actual fill price
-    // - Only BTC allowed
-    // =========================================================================
-    const v36Engine = getV36QuotingEngine();
-    const pairTracker = getPairTracker();
+  // =========================================================================
+  // V37: SIMPLE PAIR OPENING
+  // =========================================================================
+  // Every tick: try to open a pair
+  // - Buy expensive side as TAKER
+  // - Place MAKER at 100 - takerPrice - 5c
+  // =========================================================================
+  if (!paused && market.asset === 'BTC') {
+    // Determine expensive side based on current asks
+    const upAsk = market.upBestAsk || 1;
+    const downAsk = market.downBestAsk || 1;
+    const expensiveSide: 'UP' | 'DOWN' = downAsk > upAsk ? 'DOWN' : 'UP';
+    const cheapSide: 'UP' | 'DOWN' = expensiveSide === 'UP' ? 'DOWN' : 'UP';
     
-    // Only BTC
-    if (market.asset !== 'BTC') {
-      log(`   ⚠️ V36.2: Skipping non-BTC market (${market.asset})`);
-    } else if (!pairTracker.isStartupDelayComplete(market.slug)) {
-      // Check startup delay first
-      log(`   ⏳ V36.2: Startup delay active - observing market...`);
-    } else {
-      // Determine expensive side based on current asks
-      const upAsk = market.upBestAsk || 1;
-      const downAsk = market.downBestAsk || 1;
-      const expensiveSide: 'UP' | 'DOWN' = downAsk > upAsk ? 'DOWN' : 'UP';
-      const cheapSide: 'UP' | 'DOWN' = expensiveSide === 'UP' ? 'DOWN' : 'UP';
+    // Get prices for logging
+    const takerPrice = expensiveSide === 'UP' ? upAsk : downAsk;
+    const makerPrice = 1.00 - takerPrice - 0.05; // 5c margin
+    
+    log(`   📊 V37 Analysis:`);
+    log(`      TAKER ${expensiveSide} @ ~$${takerPrice.toFixed(3)}`);
+    log(`      MAKER ${cheapSide} @ ~$${makerPrice.toFixed(3)} (100 - ${takerPrice.toFixed(2)} - 5c)`);
+    log(`      TARGET CPP: $0.95`);
+    
+    // Try to open a pair (respects 5s cooldown + max 10 pairs)
+    if (pairTracker.canOpenNewPair()) {
+      const pairSize = 10; // Fixed 10 shares per pair
       
-      // Get prices for logging only
-      const takerPrice = expensiveSide === 'UP' ? upAsk : downAsk;
-      const cheapBid = cheapSide === 'UP' ? (market.upBestBid || 0) : (market.downBestBid || 0);
-      const cheapAsk = cheapSide === 'UP' ? (market.upBestAsk || 1) : (market.downBestAsk || 1);
+      log(`   🎯 V37: Opening pair...`);
       
-      // V36.10: Start with lower target CPP for better margin
-      // The CPP will escalate over time (0.93 → 0.95 → 0.97 → 0.99 → 1.00)
-      const targetCpp = 0.93;  // V36.10: Lower starting point
-      const projectedMakerPrice = targetCpp - takerPrice;
-      const projectedCpp = takerPrice + Math.max(0.05, projectedMakerPrice);
+      const pairResult = await pairTracker.openPair(market, expensiveSide, pairSize);
       
-      // V36.8: Maker viability check is INFO ONLY (not a blocker)
-      // We place LIMIT orders - we don't care about current ask, we wait for market to come to us
-      const makerGap = cheapAsk - projectedMakerPrice;
-      const makerGapWarning = makerGap > 0.03 ? '⚠️' : '✅';
-      
-      log(`   📊 V36.3.8 Pair Analysis:`);
-      log(`      TAKER ${expensiveSide} @ ~$${takerPrice.toFixed(3)} (market order)`);
-      log(`      MAKER ${cheapSide} @ ~$${projectedMakerPrice.toFixed(3)} (after fill: $0.95 - fillPrice)`);
-      log(`      ${makerGapWarning} Maker spread: ask $${cheapAsk.toFixed(3)} | gap ${(makerGap * 100).toFixed(1)}¢ (INFO ONLY)`);
-      log(`      Target CPP: $${targetCpp.toFixed(3)} | Estimated: $${projectedCpp.toFixed(3)}`);
-      
-      // V36.8: ALWAYS open pair if CPP is viable - combined ask doesn't matter!
-      // We provide liquidity with limit orders, so edge is calculated on OUR prices, not market.
-      // V36.13: Pass market to enable ABSOLUTE SHARE CAP GUARD (max 50 shares imbalance)
-      if (pairTracker.canOpenNewPair(market)) {
-        const pairSize = Math.max(5, Math.min(15, 10)); // 5-15 shares per pair
-        
-        log(`   🎯 V36.8: Opening pair (CPP-based, maker gap is INFO only)`);
-        
-        const pairResult = await pairTracker.openPair(market, expensiveSide, pairSize);
-        
-        if (pairResult.success) {
-          log(`   ✅ Pair ${pairResult.pairId} opened - awaiting taker fill`);
-        } else {
-          log(`   ⚠️ Pair open failed: ${pairResult.error}`);
-        }
+      if (pairResult.success) {
+        log(`   ✅ Pair ${pairResult.pairId} opened!`);
       } else {
-        log(`   ⏸️ Pair blocked - waiting for hedges or conditions to improve`);
+        log(`   ⚠️ Pair failed: ${pairResult.error}`);
       }
+    } else {
+      log(`   ⏸️ Waiting (cooldown or max pairs)`);
     }
-    
-    // =========================================================================
-    // V36 FALLBACK: PASSIVE QUOTING (disabled in pair-based mode)
-    // =========================================================================
-    // When running in pair mode, we don't want additional passive quotes
-    // that could create untracked exposure. Skip the V36 quoting engine.
-    // =========================================================================
-    // Keep combined-book logging (visibility) but do NOT run quote generation.
-    const combinedBook = v36Engine.getCombinedBook(market.slug);
-    if (combinedBook) {
-      logCombinedBook(combinedBook, market.asset);
-    }
-
-    // =========================================================================
-    // V36.2.8 FIX: DO NOT CALL syncOrders IN PAIR-BASED MODE!
-    // =========================================================================
-    // The old code passed empty quote arrays to syncOrders, which then:
-    // 1. Detected that NO target prices exist (empty set)
-    // 2. Cancelled ALL existing orders (because they weren't in target)
-    // 
-    // This broke V36 pair-based trading because:
-    // - PairTracker places maker limit orders
-    // - syncOrders immediately cancels them!
-    // 
-    // FIX: Skip syncOrders entirely in pair-based mode.
-    // PairTracker is solely responsible for order lifecycle management.
-    // =========================================================================
-    
-    // Debug: log quote generation (V36.1: passive quotes disabled, pair-based only)
-    const imbalance = Math.abs(market.upQty - market.downQty);
-    log(`   📦 V36.2.8 Mode: Passive quotes + syncOrders DISABLED`);
-    log(`   📊 Inventory: UP=${market.upQty.toFixed(0)} DOWN=${market.downQty.toFixed(0)} (imbalance=${imbalance.toFixed(0)})`);
-    log(`   💰 Best asks: UP=$${market.upBestAsk?.toFixed(2)} DOWN=$${market.downBestAsk?.toFixed(2)}`);
-    log(`   🎯 PairTracker manages all orders - no grid sync`);
-    
-    // NO syncOrders call - PairTracker handles everything
   }
 }
 
