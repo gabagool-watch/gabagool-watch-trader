@@ -523,6 +523,31 @@ export class PairTracker {
     return Array.from(this.pairs.values());
   }
   
+  /**
+   * Get stats for logging/monitoring
+   */
+  getStats(): {
+    totalPairs: number;
+    waitingPairs: number;
+    hedgedPairs: number;
+    totalTakerShares: number;
+    totalMakerShares: number;
+    totalPnl: number;
+  } {
+    const allPairs = this.getAllPairs();
+    const waiting = allPairs.filter(p => p.status === 'WAITING_HEDGE');
+    const hedged = allPairs.filter(p => p.status === 'HEDGED');
+    
+    return {
+      totalPairs: allPairs.length,
+      waitingPairs: waiting.length,
+      hedgedPairs: hedged.length,
+      totalTakerShares: allPairs.reduce((sum, p) => sum + (p.takerFilledSize || 0), 0),
+      totalMakerShares: allPairs.reduce((sum, p) => sum + (p.makerFilledSize || 0), 0),
+      totalPnl: hedged.reduce((sum, p) => sum + (p.pnl || 0), 0),
+    };
+  }
+  
   // ============================================================
   // LEGACY COMPATIBILITY STUBS
   // ============================================================
