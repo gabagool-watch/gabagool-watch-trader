@@ -29,6 +29,7 @@ import { Button } from '@/components/ui/button';
 import { useEffect, useState } from 'react';
 import { V35FillTimeline } from './V35FillTimeline';
 import { V35MarketPriceChart } from './V35MarketPriceChart';
+import { V35MiniSharesChart } from './V35MiniSharesChart';
 
 // =========================================================================
 // STRATEGY LIMITS (must match local-runner/src/v35/config.ts V35.4.5)
@@ -760,6 +761,21 @@ export function V35OpenPositions() {
                     <div className="px-4 py-3 bg-muted/10 border-t border-border/50">
                       <V35MarketPriceChart 
                         asset={pos.asset}
+                        marketSlug={pos.market_slug}
+                        startTs={timeInfo.startTs}
+                        endTs={timeInfo.endTs}
+                      />
+                    </div>
+                  )}
+                  
+                  {/* Shares Progression Chart - shows UP/DOWN over time */}
+                  {timeInfo && (
+                    <div className="px-4 py-3 bg-muted/10 border-t border-border/50">
+                      <div className="text-xs text-muted-foreground mb-1 flex items-center gap-1">
+                        <Activity className="h-3 w-3" />
+                        Shares Progression
+                      </div>
+                      <V35MiniSharesChart 
                         marketSlug={pos.market_slug}
                         startTs={timeInfo.startTs}
                         endTs={timeInfo.endTs}
