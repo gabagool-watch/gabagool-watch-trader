@@ -1,15 +1,15 @@
 // ============================================================
-// V37 PAIR TRACKER - SIMPLE DUMB LOOP
+// V37 PAIR TRACKER - SHARED MAKER APPROACH
 // ============================================================
-// Version: V37.0.0 - "Back to Basics"
+// Version: V37.1.0 - "Shared Maker"
 //
-// SUPER SIMPLE LOGIC:
-// 1. Every 5 seconds: buy expensive side as TAKER
-// 2. Immediately place MAKER limit at: 100 - takerPrice - 5c
-// 3. Max 10 pairs open (WAITING_HEDGE status)
-// 4. No reversals, no guards, no complexity
+// STRATEGY:
+// 1. Place 1 LARGE maker order at cheap side (100 shares @ 1c)
+// 2. Every 5 seconds: buy expensive side as TAKER (3-97c only)
+// 3. Multiple takers hedge against the same maker order
+// 4. Max 10 takers per market
 //
-// That's it. Simple market making.
+// PRICE GUARD: Only trade when expensive side is 3-97c
 // ============================================================
 
 import type { V35Market, V35Side, V35Asset, V35Fill } from './types.js';
@@ -28,6 +28,38 @@ export type PairStatus =
   | 'HEDGED'             // Both sides filled
   | 'EXPIRED'            // Market expired
   | 'CANCELLED';         // Manually cancelled
+
+export interface TakerEntry {
+  id: string;
+  takerOrderId: string;
+  takerSide: V35Side;
+  takerPrice: number;
+  takerSize: number;
+  takerFilledAt: number;
+  createdAt: number;
+}
+
+export interface SharedMaker {
+  marketSlug: string;
+  asset: V35Asset;
+  conditionId: string;
+  
+  // The maker order
+  makerSide: V35Side;
+  makerPrice: number;
+  makerSize: number;
+  makerOrderId?: string;
+  makerFilledSize: number;
+  
+  // Takers that hedge against this maker
+  takers: TakerEntry[];
+  totalTakerShares: number;
+  
+  // Status
+  status: 'ACTIVE' | 'FILLED' | 'EXPIRED' | 'CANCELLED';
+  createdAt: number;
+  updatedAt: number;
+}
 
 export interface PendingPair {
   id: string;
@@ -65,97 +97,199 @@ export interface PendingPair {
 }
 
 export interface PairTrackerConfig {
-  maxPendingPairs: number;           // Max concurrent pairs (WAITING_HEDGE)
+  maxTakersPerMarket: number;        // Max takers hedging against one maker
+  sharedMakerSize: number;           // Size of shared maker order (e.g., 100)
+  sharedMakerPrice: number;          // Price for shared maker (e.g., 0.01 = 1c)
   targetMargin: number;              // Target margin (default 5c = 0.05)
-  minSharesPerPair: number;          // Minimum shares per pair
-  maxSharesPerPair: number;          // Maximum shares per pair
-  pairCooldownMs: number;            // Interval between new pairs
+  minSharesPerTaker: number;         // Minimum shares per taker
+  maxSharesPerTaker: number;         // Maximum shares per taker
+  pairCooldownMs: number;            // Interval between new takers
+  minExpensivePrice: number;         // Min price for expensive side (3c)
+  maxExpensivePrice: number;         // Max price for expensive side (97c)
 }
 
 const DEFAULT_CONFIG: PairTrackerConfig = {
-  maxPendingPairs: 10,              // Max 10 open maker orders
-  targetMargin: 0.05,               // 5c margin = 95c CPP
-  minSharesPerPair: 5,
-  maxSharesPerPair: 20,
-  pairCooldownMs: 5_000,            // 5 seconds between pairs
+  maxTakersPerMarket: 10,            // Max 10 takers per shared maker
+  sharedMakerSize: 100,              // 100 shares @ 1c maker
+  sharedMakerPrice: 0.01,            // 1c maker price
+  targetMargin: 0.05,                // 5c margin = 95c CPP
+  minSharesPerTaker: 5,
+  maxSharesPerTaker: 20,
+  pairCooldownMs: 5_000,             // 5 seconds between takers
+  minExpensivePrice: 0.03,           // 3c minimum
+  maxExpensivePrice: 0.97,           // 97c maximum
 };
 
 // ============================================================
-// PAIR TRACKER CLASS - SIMPLE VERSION
+// PAIR TRACKER CLASS - SHARED MAKER VERSION
 // ============================================================
 
 export class PairTracker {
   private config: PairTrackerConfig;
+  private sharedMakers: Map<string, SharedMaker> = new Map();
   private pairs: Map<string, PendingPair> = new Map();
   private pairCounter = 0;
-  private lastPairOpenedAt: number = 0;
+  private lastTakerOpenedAt: number = 0;
   
   constructor(config: Partial<PairTrackerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
   
   // ============================================================
-  // SIMPLE CHECKS
+  // PRICE GUARD
   // ============================================================
   
   /**
-   * Check if we can open a new pair
-   * Only checks: cooldown + max pairs
+   * Check if price is within acceptable range (3-97c)
    */
-  canOpenNewPair(): boolean {
+  isPriceAcceptable(price: number): boolean {
+    return price >= this.config.minExpensivePrice && price <= this.config.maxExpensivePrice;
+  }
+  
+  // ============================================================
+  // SHARED MAKER MANAGEMENT
+  // ============================================================
+  
+  /**
+   * Get or create shared maker for a market
+   */
+  getSharedMaker(marketSlug: string): SharedMaker | undefined {
+    return this.sharedMakers.get(marketSlug);
+  }
+  
+  /**
+   * Check if we need to place a shared maker order
+   */
+  needsSharedMaker(marketSlug: string): boolean {
+    const existing = this.sharedMakers.get(marketSlug);
+    if (!existing) return true;
+    if (existing.status === 'FILLED' || existing.status === 'EXPIRED' || existing.status === 'CANCELLED') return true;
+    return false;
+  }
+  
+  /**
+   * Place the shared maker order (100 shares @ 1c on cheap side)
+   */
+  async placeSharedMaker(
+    market: V35Market,
+    cheapSide: V35Side
+  ): Promise<{ success: boolean; orderId?: string; error?: string }> {
+    const config = getV35Config();
+    
+    // Only BTC for now
+    if (market.asset !== 'BTC') {
+      return { success: false, error: 'only_btc' };
+    }
+    
+    // Check if we already have an active maker
+    const existing = this.sharedMakers.get(market.slug);
+    if (existing && existing.status === 'ACTIVE') {
+      console.log(`[PairTracker] Already have active maker for ${market.slug}`);
+      return { success: true, orderId: existing.makerOrderId };
+    }
+    
+    const makerTokenId = cheapSide === 'UP' ? market.upTokenId : market.downTokenId;
+    
+    console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+    console.log(`[PairTracker] 📝 PLACING SHARED MAKER`);
+    console.log(`[PairTracker]    ${this.config.sharedMakerSize} ${cheapSide} @ $${this.config.sharedMakerPrice.toFixed(2)}`);
+    console.log(`[PairTracker]    Market: ${market.slug.slice(-30)}`);
+    console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
+    
+    if (config.dryRun) {
+      console.log(`[PairTracker] [DRY RUN] Would place shared maker`);
+      return { success: false, error: 'dry_run' };
+    }
+    
+    try {
+      const makerResult = await placeOrder({
+        tokenId: makerTokenId,
+        side: 'BUY',
+        price: this.config.sharedMakerPrice,
+        size: this.config.sharedMakerSize,
+        orderType: 'GTC',
+      });
+      
+      if (!makerResult.success || !makerResult.orderId) {
+        console.log(`[PairTracker] ❌ Shared maker failed: ${makerResult.error}`);
+        return { success: false, error: makerResult.error || 'maker_failed' };
+      }
+      
+      registerOurOrderId(makerResult.orderId);
+      
+      // Create shared maker object
+      const sharedMaker: SharedMaker = {
+        marketSlug: market.slug,
+        asset: market.asset,
+        conditionId: market.conditionId,
+        makerSide: cheapSide,
+        makerPrice: this.config.sharedMakerPrice,
+        makerSize: this.config.sharedMakerSize,
+        makerOrderId: makerResult.orderId,
+        makerFilledSize: 0,
+        takers: [],
+        totalTakerShares: 0,
+        status: 'ACTIVE',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      
+      this.sharedMakers.set(market.slug, sharedMaker);
+      
+      console.log(`[PairTracker] ✅ Shared maker placed: ${makerResult.orderId}`);
+      
+      return { success: true, orderId: makerResult.orderId };
+      
+    } catch (err: any) {
+      console.error(`[PairTracker] Error placing shared maker:`, err?.message);
+      return { success: false, error: err?.message };
+    }
+  }
+  
+  // ============================================================
+  // TAKER MANAGEMENT
+  // ============================================================
+  
+  /**
+   * Check if we can open a new taker
+   */
+  canOpenNewTaker(marketSlug: string): boolean {
     // Check cooldown
-    const timeSinceLastPair = Date.now() - this.lastPairOpenedAt;
-    if (timeSinceLastPair < this.config.pairCooldownMs) {
-      const remaining = Math.ceil((this.config.pairCooldownMs - timeSinceLastPair) / 1000);
+    const timeSinceLastTaker = Date.now() - this.lastTakerOpenedAt;
+    if (timeSinceLastTaker < this.config.pairCooldownMs) {
+      const remaining = Math.ceil((this.config.pairCooldownMs - timeSinceLastTaker) / 1000);
       console.log(`[PairTracker] ⏳ Cooldown: ${remaining}s remaining`);
       return false;
     }
     
-    // Check max pairs (only count WAITING_HEDGE)
-    const waitingCount = this.getWaitingPairs().length;
-    if (waitingCount >= this.config.maxPendingPairs) {
-      console.log(`[PairTracker] 🛑 Max pairs: ${waitingCount}/${this.config.maxPendingPairs}`);
+    // Check if we have an active shared maker
+    const sharedMaker = this.sharedMakers.get(marketSlug);
+    if (!sharedMaker || sharedMaker.status !== 'ACTIVE') {
+      console.log(`[PairTracker] 🛑 No active shared maker for ${marketSlug.slice(-30)}`);
       return false;
     }
     
-    console.log(`[PairTracker] ✅ Can open: ${waitingCount}/${this.config.maxPendingPairs} pairs`);
+    // Check max takers
+    if (sharedMaker.takers.length >= this.config.maxTakersPerMarket) {
+      console.log(`[PairTracker] 🛑 Max takers: ${sharedMaker.takers.length}/${this.config.maxTakersPerMarket}`);
+      return false;
+    }
+    
+    // Check if taker shares would exceed maker capacity
+    const remainingMakerCapacity = sharedMaker.makerSize - sharedMaker.totalTakerShares;
+    if (remainingMakerCapacity < this.config.minSharesPerTaker) {
+      console.log(`[PairTracker] 🛑 Maker capacity exhausted: ${remainingMakerCapacity} shares left`);
+      return false;
+    }
+    
+    console.log(`[PairTracker] ✅ Can open: ${sharedMaker.takers.length}/${this.config.maxTakersPerMarket} takers, ${remainingMakerCapacity} maker capacity`);
     return true;
   }
   
   /**
-   * Get pairs in WAITING_HEDGE status
+   * Open a new taker that hedges against the shared maker
    */
-  getWaitingPairs(): PendingPair[] {
-    return Array.from(this.pairs.values()).filter(p => p.status === 'WAITING_HEDGE');
-  }
-  
-  /**
-   * Get all active pairs (PENDING_ENTRY + WAITING_HEDGE)
-   */
-  getActivePairs(): PendingPair[] {
-    return Array.from(this.pairs.values()).filter(p => 
-      p.status === 'PENDING_ENTRY' || p.status === 'WAITING_HEDGE'
-    );
-  }
-  
-  /**
-   * Get pairs for a specific market
-   */
-  getMarketPairs(marketSlug: string): PendingPair[] {
-    return Array.from(this.pairs.values()).filter(p => p.marketSlug === marketSlug);
-  }
-  
-  // ============================================================
-  // MAIN ENTRY: OPEN PAIR
-  // ============================================================
-  
-  /**
-   * Open a new pair - SIMPLE VERSION
-   * 
-   * 1. Buy expensive side as TAKER (FOK)
-   * 2. Place MAKER limit at: 100 - takerPrice - 5c
-   */
-  async openPair(
+  async openTaker(
     market: V35Market,
     expensiveSide: V35Side,
     size: number
@@ -167,34 +301,29 @@ export class PairTracker {
       return { success: false, error: 'only_btc' };
     }
     
+    // Get expensive price
+    const expensiveAsk = expensiveSide === 'UP' ? market.upBestAsk : market.downBestAsk;
+    
+    // PRICE GUARD: Check 3-97c range
+    if (!this.isPriceAcceptable(expensiveAsk)) {
+      console.log(`[PairTracker] 🛑 PRICE GUARD: ${expensiveSide} @ $${expensiveAsk.toFixed(2)} outside 3-97c range`);
+      return { success: false, error: 'price_outside_range' };
+    }
+    
     // Check if we can open
-    if (!this.canOpenNewPair()) {
-      return { success: false, error: 'cooldown_or_max_pairs' };
+    if (!this.canOpenNewTaker(market.slug)) {
+      return { success: false, error: 'cooldown_or_max_takers' };
     }
     
     // Set cooldown immediately
-    this.lastPairOpenedAt = Date.now();
+    this.lastTakerOpenedAt = Date.now();
     
-    // Clamp size
-    size = Math.max(this.config.minSharesPerPair, Math.min(size, this.config.maxSharesPerPair));
+    // Get shared maker
+    const sharedMaker = this.sharedMakers.get(market.slug)!;
     
-    // Get prices
-    const expensiveAsk = expensiveSide === 'UP' ? market.upBestAsk : market.downBestAsk;
-    const cheapSide: V35Side = expensiveSide === 'UP' ? 'DOWN' : 'UP';
-    
-    // Calculate maker price: 100 - takerPrice - margin
-    const makerPrice = 1.00 - expensiveAsk - this.config.targetMargin;
-    
-    // Validate maker price
-    if (makerPrice < 0.01) {
-      console.log(`[PairTracker] ❌ Maker price too low: $${makerPrice.toFixed(3)}`);
-      return { success: false, error: 'maker_price_below_1c' };
-    }
-    
-    if (makerPrice > 0.99) {
-      console.log(`[PairTracker] ❌ Maker price too high: $${makerPrice.toFixed(3)}`);
-      return { success: false, error: 'maker_price_above_99c' };
-    }
+    // Clamp size to remaining maker capacity
+    const remainingCapacity = sharedMaker.makerSize - sharedMaker.totalTakerShares;
+    size = Math.max(this.config.minSharesPerTaker, Math.min(size, this.config.maxSharesPerTaker, remainingCapacity));
     
     // Ensure $1 minimum order value
     const MIN_ORDER_VALUE = 1.00;
@@ -206,16 +335,17 @@ export class PairTracker {
     
     // Create pair ID
     const pairId = `pair_${Date.now()}_${++this.pairCounter}`;
+    const cheapSide: V35Side = expensiveSide === 'UP' ? 'DOWN' : 'UP';
     
     console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
-    console.log(`[PairTracker] 🟠 OPENING ${pairId}`);
+    console.log(`[PairTracker] 🟠 OPENING TAKER ${pairId}`);
     console.log(`[PairTracker]    TAKER: ${size} ${expensiveSide} @ ~$${expensiveAsk.toFixed(2)}`);
-    console.log(`[PairTracker]    MAKER: ${size} ${cheapSide} @ $${makerPrice.toFixed(2)} (limit)`);
-    console.log(`[PairTracker]    TARGET CPP: $${(1.00 - this.config.targetMargin).toFixed(2)}`);
+    console.log(`[PairTracker]    SHARED MAKER: ${sharedMaker.makerSize} ${cheapSide} @ $${sharedMaker.makerPrice.toFixed(2)}`);
+    console.log(`[PairTracker]    TARGET CPP: $${(expensiveAsk + sharedMaker.makerPrice).toFixed(2)}`);
     console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
     
     if (config.dryRun) {
-      console.log(`[PairTracker] [DRY RUN] Would open pair`);
+      console.log(`[PairTracker] [DRY RUN] Would open taker`);
       return { success: false, error: 'dry_run' };
     }
     
@@ -231,23 +361,23 @@ export class PairTracker {
       takerSize: size,
       
       makerSide: cheapSide,
-      makerPrice: makerPrice,
+      makerPrice: sharedMaker.makerPrice,
       makerSize: size,
+      makerOrderId: sharedMaker.makerOrderId,
       
       status: 'PENDING_ENTRY',
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      targetCpp: 1.00 - this.config.targetMargin,
+      targetCpp: expensiveAsk + sharedMaker.makerPrice,
     };
     
     this.pairs.set(pairId, pair);
     
-    // Get token IDs
+    // Get token ID
     const takerTokenId = expensiveSide === 'UP' ? market.upTokenId : market.downTokenId;
-    const makerTokenId = cheapSide === 'UP' ? market.upTokenId : market.downTokenId;
     
     // =========================================================================
-    // STEP 1: PLACE TAKER (FOK)
+    // PLACE TAKER (FOK)
     // =========================================================================
     try {
       const takerPrice = Math.min(0.99, expensiveAsk + 0.02); // Small buffer
@@ -283,8 +413,24 @@ export class PairTracker {
       pair.takerFilledAt = Date.now();
       pair.takerFilledPrice = filledPrice;
       pair.takerFilledSize = filledSize;
+      pair.status = 'WAITING_HEDGE';
+      pair.updatedAt = Date.now();
+      
+      // Add to shared maker's takers list
+      sharedMaker.takers.push({
+        id: pairId,
+        takerOrderId: takerResult.orderId,
+        takerSide: expensiveSide,
+        takerPrice: filledPrice,
+        takerSize: filledSize,
+        takerFilledAt: Date.now(),
+        createdAt: Date.now(),
+      });
+      sharedMaker.totalTakerShares += filledSize;
+      sharedMaker.updatedAt = Date.now();
       
       console.log(`[PairTracker] ✅ TAKER FILLED: ${filledSize} @ $${filledPrice.toFixed(3)}`);
+      console.log(`[PairTracker]    Total takers: ${sharedMaker.takers.length}, Total shares: ${sharedMaker.totalTakerShares}`);
       
       // Save fill to database
       saveV35Fill({
@@ -299,49 +445,11 @@ export class PairTracker {
         fillType: 'TAKER',
       }).catch(err => console.error('[PairTracker] Failed to save taker fill:', err));
       
-      // =========================================================================
-      // STEP 2: PLACE MAKER IMMEDIATELY (GTC limit order)
-      // =========================================================================
-      // Recalculate maker price based on actual fill price
-      const actualMakerPrice = Math.max(0.01, 1.00 - filledPrice - this.config.targetMargin);
-      
-      // Ensure $1 minimum for maker too
-      let makerSize = filledSize;
-      const makerOrderValue = makerSize * actualMakerPrice;
-      if (makerOrderValue < MIN_ORDER_VALUE) {
-        makerSize = Math.ceil(MIN_ORDER_VALUE / actualMakerPrice);
-        console.log(`[PairTracker] 📈 Adjusted maker size for $1 min: ${makerSize} shares`);
-      }
-      
-      console.log(`[PairTracker] 📝 MAKER: ${makerSize} ${cheapSide} @ $${actualMakerPrice.toFixed(3)} (GTC)`);
-      
-      const makerResult = await placeOrder({
-        tokenId: makerTokenId,
-        side: 'BUY',
-        price: actualMakerPrice,
-        size: makerSize,
-        orderType: 'GTC',
-      });
-      
-      if (!makerResult.success || !makerResult.orderId) {
-        console.log(`[PairTracker] ⚠️ Maker failed: ${makerResult.error}`);
-        // Taker already filled - we're stuck, but continue
-        pair.status = 'CANCELLED';
-        return { success: false, error: `taker_filled_maker_failed: ${makerResult.error}` };
-      }
-      
-      registerOurOrderId(makerResult.orderId);
-      pair.makerOrderId = makerResult.orderId;
-      pair.makerPrice = actualMakerPrice;
-      pair.makerSize = makerSize;
-      pair.status = 'WAITING_HEDGE';
-      pair.updatedAt = Date.now();
-      
       console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
-      console.log(`[PairTracker] ✅ PAIR OPENED: ${pairId}`);
+      console.log(`[PairTracker] ✅ TAKER OPENED: ${pairId}`);
       console.log(`[PairTracker]    TAKER: ${filledSize} ${expensiveSide} @ $${filledPrice.toFixed(3)} ✓`);
-      console.log(`[PairTracker]    MAKER: ${makerSize} ${cheapSide} @ $${actualMakerPrice.toFixed(3)} (open)`);
-      console.log(`[PairTracker]    PROJECTED CPP: $${(filledPrice + actualMakerPrice).toFixed(3)}`);
+      console.log(`[PairTracker]    SHARED MAKER: ${sharedMaker.makerSize} ${cheapSide} @ $${sharedMaker.makerPrice.toFixed(3)}`);
+      console.log(`[PairTracker]    PROJECTED CPP: $${(filledPrice + sharedMaker.makerPrice).toFixed(3)}`);
       console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
       
       // Log to database
@@ -354,8 +462,8 @@ export class PairTracker {
         takerPrice: filledPrice,
         takerSize: filledSize,
         makerSide: cheapSide,
-        makerPrice: actualMakerPrice,
-        makerSize: makerSize,
+        makerPrice: sharedMaker.makerPrice,
+        makerSize: filledSize,
         status: 'WAITING_HEDGE',
       }).catch(() => {});
       
@@ -369,23 +477,78 @@ export class PairTracker {
   }
   
   // ============================================================
+  // BACKWARD COMPATIBLE: openPair delegates to openTaker
+  // ============================================================
+  
+  async openPair(
+    market: V35Market,
+    expensiveSide: V35Side,
+    size: number
+  ): Promise<{ success: boolean; pairId?: string; error?: string }> {
+    // First ensure we have a shared maker
+    const cheapSide: V35Side = expensiveSide === 'UP' ? 'DOWN' : 'UP';
+    if (this.needsSharedMaker(market.slug)) {
+      const makerResult = await this.placeSharedMaker(market, cheapSide);
+      if (!makerResult.success) {
+        return { success: false, error: `shared_maker_failed: ${makerResult.error}` };
+      }
+    }
+    
+    // Then open taker
+    return this.openTaker(market, expensiveSide, size);
+  }
+  
+  // ============================================================
   // FILL HANDLING
   // ============================================================
   
   /**
    * Handle a fill from WebSocket
-   * Just marks the pair as HEDGED if maker fills
+   * Marks pairs as HEDGED when maker fills
    */
   onFill(fill: V35Fill): void {
-    // Find the pair this fill belongs to
+    // Check if this is a maker fill for any shared maker
+    for (const [marketSlug, sharedMaker] of this.sharedMakers) {
+      if (sharedMaker.makerOrderId === fill.orderId && sharedMaker.status === 'ACTIVE') {
+        // Maker filled!
+        sharedMaker.makerFilledSize += fill.size;
+        sharedMaker.updatedAt = Date.now();
+        
+        console.log(`[PairTracker] 📥 MAKER FILL: ${fill.size} ${sharedMaker.makerSide} @ $${fill.price.toFixed(3)}`);
+        console.log(`[PairTracker]    Total maker filled: ${sharedMaker.makerFilledSize}/${sharedMaker.makerSize}`);
+        
+        // Save maker fill
+        saveV35Fill({
+          orderId: fill.orderId,
+          tokenId: fill.tokenId,
+          side: sharedMaker.makerSide,
+          price: fill.price,
+          size: fill.size,
+          timestamp: new Date(),
+          marketSlug: sharedMaker.marketSlug,
+          asset: sharedMaker.asset,
+          fillType: 'MAKER',
+        }).catch(err => console.error('[PairTracker] Failed to save maker fill:', err));
+        
+        // Update pairs that are waiting for this hedge
+        this.updatePairsWithMakerFill(marketSlug, fill);
+        
+        // Check if maker is fully filled
+        if (sharedMaker.makerFilledSize >= sharedMaker.makerSize) {
+          sharedMaker.status = 'FILLED';
+          console.log(`[PairTracker] ✅ Shared maker fully filled`);
+        }
+        
+        return;
+      }
+    }
+    
+    // Legacy: check individual pairs
     const pair = Array.from(this.pairs.values()).find(p => 
       p.makerOrderId === fill.orderId && p.status === 'WAITING_HEDGE'
     );
     
-    if (!pair) {
-      // Could be taker fill or unknown - ignore
-      return;
-    }
+    if (!pair) return;
     
     // Maker filled!
     pair.makerFilledAt = Date.now();
@@ -399,7 +562,7 @@ export class PairTracker {
     const pairedShares = Math.min(pair.takerFilledSize || 0, pair.makerFilledSize);
     
     pair.actualCpp = totalCost / pairedShares;
-    pair.pnl = pairedShares - totalCost; // Each pair pays $1 at settlement
+    pair.pnl = pairedShares - totalCost;
     
     // Check if fully hedged
     if (pair.makerFilledSize >= (pair.takerFilledSize || 0)) {
@@ -413,20 +576,6 @@ export class PairTracker {
       console.log(`[PairTracker]    CPP: $${pair.actualCpp?.toFixed(3)} | P&L: $${pair.pnl?.toFixed(2)}`);
       console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
       
-      // Save maker fill
-      saveV35Fill({
-        orderId: fill.orderId,
-        tokenId: fill.tokenId,
-        side: pair.makerSide,
-        price: fill.price,
-        size: fill.size,
-        timestamp: new Date(),
-        marketSlug: pair.marketSlug,
-        asset: pair.asset,
-        fillType: 'MAKER',
-      }).catch(err => console.error('[PairTracker] Failed to save maker fill:', err));
-      
-      // Log hedged event
       logPairEvent({
         pairId: pair.id,
         eventType: 'pair_hedged',
@@ -442,6 +591,70 @@ export class PairTracker {
         pnl: pair.pnl,
         status: 'HEDGED',
       }).catch(() => {});
+    }
+  }
+  
+  /**
+   * Update pairs when shared maker gets filled
+   */
+  private updatePairsWithMakerFill(marketSlug: string, fill: V35Fill): void {
+    const sharedMaker = this.sharedMakers.get(marketSlug);
+    if (!sharedMaker) return;
+    
+    // Find all waiting pairs for this market
+    const waitingPairs = Array.from(this.pairs.values()).filter(p => 
+      p.marketSlug === marketSlug && 
+      p.status === 'WAITING_HEDGE' &&
+      p.makerOrderId === fill.orderId
+    );
+    
+    // Distribute filled shares among waiting pairs (FIFO)
+    let remainingFillSize = fill.size;
+    
+    for (const pair of waitingPairs) {
+      if (remainingFillSize <= 0) break;
+      
+      const neededSize = (pair.takerFilledSize || 0) - (pair.makerFilledSize || 0);
+      if (neededSize <= 0) continue;
+      
+      const fillForPair = Math.min(neededSize, remainingFillSize);
+      pair.makerFilledAt = Date.now();
+      pair.makerFilledPrice = fill.price;
+      pair.makerFilledSize = (pair.makerFilledSize || 0) + fillForPair;
+      remainingFillSize -= fillForPair;
+      
+      // Calculate P&L
+      const takerCost = (pair.takerFilledPrice || 0) * (pair.takerFilledSize || 0);
+      const makerCost = (pair.makerFilledPrice || 0) * pair.makerFilledSize;
+      const totalCost = takerCost + makerCost;
+      const pairedShares = Math.min(pair.takerFilledSize || 0, pair.makerFilledSize);
+      
+      pair.actualCpp = totalCost / pairedShares;
+      pair.pnl = pairedShares - totalCost;
+      
+      // Check if fully hedged
+      if (pair.makerFilledSize >= (pair.takerFilledSize || 0)) {
+        pair.status = 'HEDGED';
+        pair.updatedAt = Date.now();
+        
+        console.log(`[PairTracker] ✅ ${pair.id} HEDGED via shared maker | CPP: $${pair.actualCpp?.toFixed(3)}`);
+        
+        logPairEvent({
+          pairId: pair.id,
+          eventType: 'pair_hedged',
+          marketSlug: pair.marketSlug,
+          asset: pair.asset,
+          takerSide: pair.takerSide,
+          takerPrice: pair.takerFilledPrice || 0,
+          takerSize: pair.takerFilledSize || 0,
+          makerSide: pair.makerSide,
+          makerPrice: pair.makerFilledPrice || 0,
+          makerSize: pair.makerFilledSize,
+          cpp: pair.actualCpp,
+          pnl: pair.pnl,
+          status: 'HEDGED',
+        }).catch(() => {});
+      }
     }
   }
   
@@ -465,6 +678,13 @@ export class PairTracker {
       this.pairs.delete(pair.id);
     }
     
+    // Also reset shared maker
+    const sharedMaker = this.sharedMakers.get(marketSlug);
+    if (sharedMaker) {
+      sharedMaker.status = 'EXPIRED';
+      this.sharedMakers.delete(marketSlug);
+    }
+    
     if (reset > 0) {
       console.log(`[PairTracker] 🔄 Reset ${reset} pairs for: ${marketSlug.slice(-30)}`);
     }
@@ -476,10 +696,24 @@ export class PairTracker {
    * Cancel all open maker orders for a market
    */
   async cancelAllMakerOrders(marketSlug: string): Promise<number> {
+    let cancelled = 0;
+    
+    // Cancel shared maker
+    const sharedMaker = this.sharedMakers.get(marketSlug);
+    if (sharedMaker && sharedMaker.makerOrderId && sharedMaker.status === 'ACTIVE') {
+      try {
+        await cancelOrder(sharedMaker.makerOrderId);
+        sharedMaker.status = 'CANCELLED';
+        cancelled++;
+      } catch (err) {
+        console.error(`[PairTracker] Failed to cancel shared maker:`, err);
+      }
+    }
+    
+    // Cancel individual pairs
     const waitingPairs = this.getMarketPairs(marketSlug)
       .filter(p => p.status === 'WAITING_HEDGE' && p.makerOrderId);
     
-    let cancelled = 0;
     for (const pair of waitingPairs) {
       try {
         await cancelOrder(pair.makerOrderId!);
@@ -494,8 +728,31 @@ export class PairTracker {
   }
   
   // ============================================================
-  // SUMMARY & DEBUG
+  // GETTERS
   // ============================================================
+  
+  /**
+   * Get pairs in WAITING_HEDGE status
+   */
+  getWaitingPairs(): PendingPair[] {
+    return Array.from(this.pairs.values()).filter(p => p.status === 'WAITING_HEDGE');
+  }
+  
+  /**
+   * Get all active pairs (PENDING_ENTRY + WAITING_HEDGE)
+   */
+  getActivePairs(): PendingPair[] {
+    return Array.from(this.pairs.values()).filter(p => 
+      p.status === 'PENDING_ENTRY' || p.status === 'WAITING_HEDGE'
+    );
+  }
+  
+  /**
+   * Get pairs for a specific market
+   */
+  getMarketPairs(marketSlug: string): PendingPair[] {
+    return Array.from(this.pairs.values()).filter(p => p.marketSlug === marketSlug);
+  }
   
   /**
    * Get summary stats for a market
@@ -505,14 +762,17 @@ export class PairTracker {
     hedged: number;
     totalTakerShares: number;
     totalMakerShares: number;
+    sharedMakerStatus?: string;
   } {
     const pairs = this.getMarketPairs(marketSlug);
+    const sharedMaker = this.sharedMakers.get(marketSlug);
     
     return {
       waiting: pairs.filter(p => p.status === 'WAITING_HEDGE').length,
       hedged: pairs.filter(p => p.status === 'HEDGED').length,
       totalTakerShares: pairs.reduce((sum, p) => sum + (p.takerFilledSize || 0), 0),
-      totalMakerShares: pairs.reduce((sum, p) => sum + (p.makerFilledSize || 0), 0),
+      totalMakerShares: sharedMaker?.makerFilledSize || pairs.reduce((sum, p) => sum + (p.makerFilledSize || 0), 0),
+      sharedMakerStatus: sharedMaker?.status,
     };
   }
   
@@ -533,10 +793,12 @@ export class PairTracker {
     totalTakerShares: number;
     totalMakerShares: number;
     totalPnl: number;
+    activeSharedMakers: number;
   } {
     const allPairs = this.getAllPairs();
     const waiting = allPairs.filter(p => p.status === 'WAITING_HEDGE');
     const hedged = allPairs.filter(p => p.status === 'HEDGED');
+    const activeSharedMakers = Array.from(this.sharedMakers.values()).filter(m => m.status === 'ACTIVE').length;
     
     return {
       totalPairs: allPairs.length,
@@ -545,11 +807,10 @@ export class PairTracker {
       totalTakerShares: allPairs.reduce((sum, p) => sum + (p.takerFilledSize || 0), 0),
       totalMakerShares: allPairs.reduce((sum, p) => sum + (p.makerFilledSize || 0), 0),
       totalPnl: hedged.reduce((sum, p) => sum + (p.pnl || 0), 0),
+      activeSharedMakers,
     };
   }
   
-  // ============================================================
-  // LEGACY COMPATIBILITY STUBS
   /**
    * Cleanup old pairs (remove HEDGED/EXPIRED/CANCELLED pairs older than 5 minutes)
    */
@@ -566,10 +827,22 @@ export class PairTracker {
         console.log(`[PairTracker] 🧹 Cleaned up old pair: ${id}`);
       }
     }
+    
+    // Also cleanup old shared makers
+    for (const [marketSlug, sharedMaker] of this.sharedMakers) {
+      if (
+        (sharedMaker.status === 'FILLED' || sharedMaker.status === 'EXPIRED' || sharedMaker.status === 'CANCELLED') &&
+        (now - sharedMaker.updatedAt) > CLEANUP_AGE_MS
+      ) {
+        this.sharedMakers.delete(marketSlug);
+        console.log(`[PairTracker] 🧹 Cleaned up old shared maker: ${marketSlug.slice(-30)}`);
+      }
+    }
   }
   
   // ============================================================
-  // These are no-ops to maintain compatibility with runner.ts
+  // LEGACY COMPATIBILITY STUBS
+  // ============================================================
   
   registerMarketStart(_marketSlug: string): void {
     // No startup delay in simple mode
