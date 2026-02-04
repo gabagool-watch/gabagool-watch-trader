@@ -159,12 +159,12 @@ export const TEST_CONFIG: V35Config = {
   gridStep: 0.02,
   sharesPerLevel: 5,
   
-  // HEDGE PARAMETERS - V36.4.0: TARGET 0.95 CPP, 1 PAIR AT A TIME
+  // HEDGE PARAMETERS - V37.2.1: TARGET 0.965 CPP (3.5% margin)
   enableActiveHedge: true,
   maxHedgeSlippage: 0.10,           // Accept up to 10¢ slippage for hedge
   hedgeTimeoutMs: 2000,             // 2 second timeout
-  minEdgeAfterHedge: -0.05,         // Max 5% loss for hedge
-  maxCombinedCost: 0.95,            // Target 5% profit ($0.95 combined)
+  minEdgeAfterHedge: -0.035,        // Max 3.5% loss for hedge
+  maxCombinedCost: 0.965,           // Target 3.5% profit ($0.965 combined)
   maxCombinedCostEmergency: 1.00,   // Emergency: break-even max
   maxExpensiveBias: 1.50,           // Expensive side can have 50% more shares
   minHedgeNotional: 1.05,           // Just above exchange min
