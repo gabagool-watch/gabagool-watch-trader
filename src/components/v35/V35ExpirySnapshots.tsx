@@ -69,7 +69,8 @@ export function V35ExpirySnapshots() {
 
   // Calculate average P&L for different time windows
   const calculateTimeWindowStats = (hours: number) => {
-    if (!snapshots || snapshots.length === 0) return { avgPnl: 0, count: 0, wins: 0, losses: 0 };
+    const defaultStats = { avgPnl: 0, count: 0, wins: 0, losses: 0, totalPnl: 0, winRate: 0 };
+    if (!snapshots || snapshots.length === 0) return defaultStats;
     
     const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000);
     const filtered = snapshots.filter(s => 
@@ -78,7 +79,7 @@ export function V35ExpirySnapshots() {
       s.predicted_winning_side
     );
     
-    if (filtered.length === 0) return { avgPnl: 0, count: 0, wins: 0, losses: 0 };
+    if (filtered.length === 0) return defaultStats;
     
     const pnls = filtered.map(s => calculatePnL(s));
     const totalPnl = pnls.reduce((sum, pnl) => sum + pnl, 0);
