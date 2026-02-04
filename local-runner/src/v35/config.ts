@@ -21,8 +21,8 @@
 // This ensures imbalances are FIXED, not abandoned via bans.
 // ============================================================
 
-export const V35_VERSION = 'V36.8.0';
-export const V35_CODENAME = 'Volatility-Scaled Margin';
+export const V35_VERSION = 'V36.13.0';
+export const V35_CODENAME = 'Absolute Share Cap Guard';
 
 export type V35Mode = 'test' | 'moderate' | 'production';
 

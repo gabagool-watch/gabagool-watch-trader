@@ -119,6 +119,7 @@ export interface PairTrackerConfig {
   maxSharesPerPair: number;          // Maximum shares per pair
   startupDelayMs: number;            // Wait after market open before first pair
   pairCooldownMs: number;            // V36.3.1: Cooldown between opening new pairs
+  maxAbsoluteShareImbalance: number; // V36.13: HARD CAP on |UP - DOWN| shares
 }
 
 const DEFAULT_CONFIG: PairTrackerConfig = {
@@ -131,6 +132,7 @@ const DEFAULT_CONFIG: PairTrackerConfig = {
   maxSharesPerPair: 20,
   startupDelayMs: 60_000,            // 1 MINUTE observation period
   pairCooldownMs: 10_000,            // V36.12: 10 seconds between new pairs
+  maxAbsoluteShareImbalance: 50,     // V36.13: BLOCK entries if gap > 50 shares
 };
 
 // ============================================================
@@ -318,7 +320,7 @@ export class PairTracker {
    * 
    * V36.6: During active reversal, allow +3 extra pairs to recover
    */
-  canOpenNewPair(): boolean {
+  canOpenNewPair(market?: V35Market): boolean {
     const activePairs = this.getActivePairs();
     const count = activePairs.length;
     
@@ -331,6 +333,43 @@ export class PairTracker {
       const remaining = Math.ceil((this.config.pairCooldownMs - timeSinceLastPair) / 1000);
       console.log(`[PairTracker] ⏳ Pair cooldown: ${remaining}s remaining`);
       return false;
+    }
+    
+    // =========================================================================
+    // V36.13: ABSOLUTE SHARE IMBALANCE GUARD
+    // =========================================================================
+    // This is the PRIMARY safety mechanism against runaway imbalance!
+    // Block ALL new entries if |UP - DOWN| exceeds the hard cap.
+    // This supersedes all other limits because share imbalance = direct loss risk.
+    // =========================================================================
+    if (market) {
+      const shareGap = Math.abs(market.upQty - market.downQty);
+      if (shareGap > this.config.maxAbsoluteShareImbalance) {
+        const leadingSide = market.upQty > market.downQty ? 'UP' : 'DOWN';
+        const laggingSide = leadingSide === 'UP' ? 'DOWN' : 'UP';
+        console.log(`\n[PairTracker] ════════════════════════════════════════════════════`);
+        console.log(`[PairTracker] 🛑 ABSOLUTE SHARE CAP GUARD TRIGGERED!`);
+        console.log(`[PairTracker]    Share Gap: ${shareGap.toFixed(1)} > ${this.config.maxAbsoluteShareImbalance} MAX`);
+        console.log(`[PairTracker]    ${leadingSide}: ${market.upQty > market.downQty ? market.upQty.toFixed(1) : market.downQty.toFixed(1)} shares`);
+        console.log(`[PairTracker]    ${laggingSide}: ${market.upQty > market.downQty ? market.downQty.toFixed(1) : market.upQty.toFixed(1)} shares`);
+        console.log(`[PairTracker]    ⚠️ BLOCKING ALL NEW ENTRIES until gap < ${this.config.maxAbsoluteShareImbalance}`);
+        console.log(`[PairTracker]    💡 Waiting for maker hedges to fill and reduce imbalance`);
+        console.log(`[PairTracker] ════════════════════════════════════════════════════\n`);
+        
+        // Log to database for visibility
+        logV35GuardEvent({
+          marketSlug: market.slug,
+          asset: market.asset,
+          guardType: 'ABSOLUTE_SHARE_CAP',
+          blockedSide: 'BOTH',
+          upQty: market.upQty,
+          downQty: market.downQty,
+          expensiveSide: leadingSide,
+          reason: `Share gap ${shareGap.toFixed(1)} > ${this.config.maxAbsoluteShareImbalance} max - blocking all entries`,
+        }).catch(() => {});
+        
+        return false;
+      }
     }
     
     // V36.9.1: Check for active reversal → use higher capacity
@@ -453,9 +492,9 @@ export class PairTracker {
       return { success: false, error: 'startup_delay_active' };
     }
     
-    // Validate
-    if (!this.canOpenNewPair()) {
-      return { success: false, error: `max_pairs_reached_or_cooldown` };
+    // Validate - V36.13: Pass market for absolute share cap check
+    if (!this.canOpenNewPair(market)) {
+      return { success: false, error: `max_pairs_reached_or_cooldown_or_share_cap` };
     }
     
     // V36.3.4: SET COOLDOWN TIMER IMMEDIATELY at entry point

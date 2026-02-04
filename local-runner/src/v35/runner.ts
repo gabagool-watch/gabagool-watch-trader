@@ -967,7 +967,8 @@ async function processMarket(market: V35Market): Promise<void> {
       
       // V36.8: ALWAYS open pair if CPP is viable - combined ask doesn't matter!
       // We provide liquidity with limit orders, so edge is calculated on OUR prices, not market.
-      if (pairTracker.canOpenNewPair()) {
+      // V36.13: Pass market to enable ABSOLUTE SHARE CAP GUARD (max 50 shares imbalance)
+      if (pairTracker.canOpenNewPair(market)) {
         const pairSize = Math.max(5, Math.min(15, 10)); // 5-15 shares per pair
         
         log(`   🎯 V36.8: Opening pair (CPP-based, maker gap is INFO only)`);
