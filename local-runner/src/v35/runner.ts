@@ -1,8 +1,15 @@
 // ============================================================
 // V36 RUNNER - PAIR-BASED MARKET MAKING
 // ============================================================
+// Version: V36.11.0 - "Instant Market Transition"
 // Version: V36.10.0 - "Dynamic CPP Escalation"
 // Version: V36.4.3 - "Fill Audit Fallback"
+//
+// V36.11.0 KEY CHANGES (CRITICAL BUG FIX):
+// - FIX: Instant market transition when current market expires
+// - Runner now immediately searches for next market (no 60s delay!)
+// - cleanupExpiredMarkets() is now async and calls refreshMarkets(true)
+// - forceSearch=true bypasses maxMarkets check after market expiry
 //
 // V36.10.0 KEY CHANGES:
 // - Dynamic CPP Escalation: Maker prices escalate over time (0.93 → 1.00)
@@ -458,11 +465,12 @@ async function handleFillFromUserWs(fill: V35Fill): Promise<void> {
 // MARKET MANAGEMENT
 // ============================================================
 
-async function refreshMarkets(): Promise<void> {
+async function refreshMarkets(forceSearch: boolean = false): Promise<void> {
   const config = getV35Config();
   
   // Check if we have room for more markets
-  if (markets.size >= config.maxMarkets) {
+  // V36.11.0: Allow forceSearch to bypass this check (used after market expiry)
+  if (!forceSearch && markets.size >= config.maxMarkets) {
     log(`📊 At max markets (${markets.size}/${config.maxMarkets})`);
     return;
   }
@@ -572,7 +580,11 @@ async function refreshMarkets(): Promise<void> {
   }
 }
 
-function cleanupExpiredMarkets(): void {
+/**
+ * V36.11.0: Cleanup expired markets and immediately search for new ones
+ * CRITICAL FIX: Returns true if markets were removed (triggers immediate refresh)
+ */
+async function cleanupExpiredMarkets(): Promise<boolean> {
   const now = Date.now();
   const circuitBreaker = getCircuitBreaker();
   const pairTracker = getPairTracker();
@@ -649,7 +661,14 @@ function cleanupExpiredMarkets(): void {
       log(`✅ All banned markets expired - circuit breaker auto-reset`);
       circuitBreaker.reset();
     }
+    
+    // V36.11.0: CRITICAL - Immediately search for the next market!
+    // Don't wait for the 60s refresh interval
+    log(`🔄 V36.11.0: Market expired - immediately searching for next market...`);
+    await refreshMarkets(true); // forceSearch=true bypasses maxMarkets check
   }
+  
+  return removed > 0;
 }
 
 // ============================================================
@@ -1190,8 +1209,8 @@ async function mainLoop(): Promise<void> {
         await processMarket(market);
       }
       
-      // Cleanup expired markets
-      cleanupExpiredMarkets();
+      // Cleanup expired markets (V36.11.0: now async - triggers immediate refresh if market expired)
+      await cleanupExpiredMarkets();
       
       // Log portfolio summary
       logPortfolioSummary();
