@@ -550,6 +550,24 @@ export class PairTracker {
   
   // ============================================================
   // LEGACY COMPATIBILITY STUBS
+  /**
+   * Cleanup old pairs (remove HEDGED/EXPIRED/CANCELLED pairs older than 5 minutes)
+   */
+  cleanup(): void {
+    const CLEANUP_AGE_MS = 5 * 60 * 1000; // 5 minutes
+    const now = Date.now();
+    
+    for (const [id, pair] of this.pairs) {
+      if (
+        (pair.status === 'HEDGED' || pair.status === 'EXPIRED' || pair.status === 'CANCELLED') &&
+        (now - pair.updatedAt) > CLEANUP_AGE_MS
+      ) {
+        this.pairs.delete(id);
+        console.log(`[PairTracker] 🧹 Cleaned up old pair: ${id}`);
+      }
+    }
+  }
+  
   // ============================================================
   // These are no-ops to maintain compatibility with runner.ts
   
