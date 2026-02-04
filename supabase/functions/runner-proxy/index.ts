@@ -2459,6 +2459,13 @@ Deno.serve(async (req) => {
           crossing_count: snapshot.crossing_count,
           spot_price: snapshot.spot_price,
           strike_price: snapshot.strike_price,
+          // V37.4.0: Merge tracking fields
+          exit_type: snapshot.exit_type || 'SETTLE',
+          merged_shares: snapshot.merged_shares || 0,
+          merge_tx_hash: snapshot.merge_tx_hash,
+          merge_executed_at: snapshot.merge_executed_at,
+          merge_gas_used: snapshot.merge_gas_used,
+          merge_error: snapshot.merge_error,
         }, { onConflict: 'market_slug' });
 
         if (error) {

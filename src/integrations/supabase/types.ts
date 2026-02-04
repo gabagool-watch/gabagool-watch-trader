@@ -6735,6 +6735,7 @@ export type Database = {
           down_best_ask: number | null
           down_best_bid: number | null
           down_orders_count: number | null
+          exit_type: string | null
           expiry_time: string
           id: string
           imbalance_ratio: number | null
@@ -6744,6 +6745,11 @@ export type Database = {
           local_up_qty: number
           locked_profit: number | null
           market_slug: string
+          merge_error: string | null
+          merge_executed_at: string | null
+          merge_gas_used: number | null
+          merge_tx_hash: string | null
+          merged_shares: number | null
           paired: number
           predicted_final_value: number | null
           predicted_pnl: number | null
@@ -6774,6 +6780,7 @@ export type Database = {
           down_best_ask?: number | null
           down_best_bid?: number | null
           down_orders_count?: number | null
+          exit_type?: string | null
           expiry_time: string
           id?: string
           imbalance_ratio?: number | null
@@ -6783,6 +6790,11 @@ export type Database = {
           local_up_qty?: number
           locked_profit?: number | null
           market_slug: string
+          merge_error?: string | null
+          merge_executed_at?: string | null
+          merge_gas_used?: number | null
+          merge_tx_hash?: string | null
+          merged_shares?: number | null
           paired?: number
           predicted_final_value?: number | null
           predicted_pnl?: number | null
@@ -6813,6 +6825,7 @@ export type Database = {
           down_best_ask?: number | null
           down_best_bid?: number | null
           down_orders_count?: number | null
+          exit_type?: string | null
           expiry_time?: string
           id?: string
           imbalance_ratio?: number | null
@@ -6822,6 +6835,11 @@ export type Database = {
           local_up_qty?: number
           locked_profit?: number | null
           market_slug?: string
+          merge_error?: string | null
+          merge_executed_at?: string | null
+          merge_gas_used?: number | null
+          merge_tx_hash?: string | null
+          merged_shares?: number | null
           paired?: number
           predicted_final_value?: number | null
           predicted_pnl?: number | null

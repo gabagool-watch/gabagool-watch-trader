@@ -76,6 +76,16 @@ import { startAutoClaimLoop, stopAutoClaimLoop } from '../redeemer.js';
 import { syncPosition as syncPositionToLedger, clearMarket as clearLedgerMarket, getEffectiveExposure } from '../exposure-ledger.js';
 // CRITICAL: Price feed logger for real-time Chainlink RTDS data (strike price accuracy)
 import { startPriceFeedLogger, stopPriceFeedLogger, getPriceFeedLoggerStats } from '../price-feed-ws-logger.js';
+// V37.4.0: Merge scheduler for pre-expiry position merging
+import { 
+  initMergeScheduler, 
+  scheduleMerge, 
+  cancelMerge, 
+  cancelAllMerges, 
+  setMergeCallback, 
+  getMergeResult,
+  isMergeSchedulerReady,
+} from './merge-scheduler.js';
 
 // ============================================================
 // CONSTANTS
@@ -121,6 +131,44 @@ function log(msg: string): void {
 function logError(msg: string, err?: any): void {
   const ts = new Date().toISOString().slice(11, 19);
   console.error(`[${ts}] ❌ ${msg}`, err?.message || err || '');
+}
+
+// ============================================================
+// V37.4.0: MERGE DATA HELPER FOR EXPIRY SNAPSHOTS
+// ============================================================
+
+/**
+ * Get merge result data for a market snapshot
+ * Returns empty object if no merge, or merge tracking fields if merged
+ */
+function getMergeDataForSnapshot(slug: string): Partial<{
+  exitType: 'SETTLE' | 'MERGE' | 'PARTIAL_MERGE';
+  mergedShares: number;
+  mergeTxHash: string;
+  mergeExecutedAt: string;
+  mergeGasUsed: number;
+  mergeError: string;
+}> {
+  const result = getMergeResult(slug);
+  
+  if (!result) {
+    return { exitType: 'SETTLE' };
+  }
+  
+  if (result.success) {
+    return {
+      exitType: 'MERGE',
+      mergedShares: result.mergedShares,
+      mergeTxHash: result.txHash,
+      mergeExecutedAt: new Date().toISOString(),
+      mergeGasUsed: result.gasUsed,
+    };
+  } else {
+    return {
+      exitType: 'SETTLE', // Failed merge = fallback to settlement
+      mergeError: result.error,
+    };
+  }
 }
 
 // ============================================================
@@ -480,6 +528,11 @@ async function refreshMarkets(forceSearch: boolean = false): Promise<void> {
     // V35.7.0: Schedule expiry snapshot for this market (1 second before expiry)
     scheduleExpirySnapshot(market);
     
+    // V37.4.0: Schedule merge for this market (10 seconds before expiry)
+    if (isMergeSchedulerReady()) {
+      scheduleMerge(market);
+    }
+    
     log(`➕ Added market: ${m.slug} (${m.asset}, expires ${m.expiry.toISOString()})`);
     added++;
   }
@@ -574,6 +627,9 @@ async function cleanupExpiredMarkets(): Promise<boolean> {
       
       // V35.7.0: Cancel any pending expiry snapshot (though it should have fired already)
       cancelExpirySnapshot(slug);
+      
+      // V37.4.0: Cancel any pending merge (though it should have fired already)
+      cancelMerge(slug);
       
       markets.delete(slug);
       removed++;
@@ -1093,6 +1149,9 @@ async function stop(): Promise<void> {
   // V35.7.0: Cancel all scheduled expiry snapshots
   cancelAllExpirySnapshots();
   
+  // V37.4.0: Cancel all scheduled merges
+  cancelAllMerges();
+  
   const config = getV35Config();
   for (const market of markets.values()) {
     await cancelAllOrders(market, config.dryRun);
@@ -1251,12 +1310,31 @@ async function main(): Promise<void> {
       crossingCount: snapshot.crossingCount,
       spotPrice: snapshot.spotPrice,
       strikePrice: snapshot.strikePrice,
+      // V37.4.0: Check if this market was merged
+      ...getMergeDataForSnapshot(snapshot.marketSlug),
     };
     saveV35ExpirySnapshot(snapshotData).catch(err => {
       logError('Failed to save expiry snapshot:', err);
     });
   });
   log('📸 Expiry snapshot scheduler configured');
+  
+  // V37.4.0: Initialize merge scheduler
+  const mergeReady = await initMergeScheduler();
+  if (mergeReady) {
+    log('🔄 Merge scheduler initialized - will merge 10s before expiry');
+    
+    // Configure merge callback to track results
+    setMergeCallback((slug, result) => {
+      if (result.success) {
+        log(`✅ [Merge] ${slug.slice(-25)}: ${result.mergedShares} pairs merged (tx: ${result.txHash?.slice(0, 16)}...)`);
+      } else {
+        log(`❌ [Merge] ${slug.slice(-25)}: Failed - ${result.error}`);
+      }
+    });
+  } else {
+    log('⚠️ Merge scheduler not available (no private key configured?)');
+  }
 
   // Wire HedgeManager -> immediate order cancellations when hedging is not viable / fails.
   // This prevents runaway one-sided inventory accumulation between market loop ticks.
