@@ -94,6 +94,19 @@ export function scheduleMerge(market: V35Market): void {
   const mergeTime = expiryMs + (MERGE_AFTER_EXPIRY_SEC * 1000); // 30s AFTER expiry
   const delayMs = mergeTime - now;
   
+  // Create entry first (before any async operations)
+  const entry: MergeScheduleEntry = {
+    marketSlug: slug,
+    conditionId: market.conditionId,
+    asset: market.asset,
+    expiryTime: expiryMs,
+    mergeTime,
+    timeout: null as any, // Will be set below
+    status: 'scheduled',
+  };
+  
+  scheduledMerges.set(slug, entry);
+  
   // Don't schedule if in the past (shouldn't happen)
   if (delayMs <= 0) {
     console.log(`[MergeScheduler] ${slug.slice(-25)}: Merge time already passed, executing immediately`);
@@ -106,23 +119,11 @@ export function scheduleMerge(market: V35Market): void {
   const secsUntilExpiry = Math.max(0, (expiryMs - now) / 1000);
   console.log(`[MergeScheduler] Scheduled merge for ${slug.slice(-25)} in ${(delayMs / 1000).toFixed(0)}s (expiry in ${secsUntilExpiry.toFixed(0)}s + 30s wait)`)
   
-  const timeout = setTimeout(() => {
+  entry.timeout = setTimeout(() => {
     executeMerge(market).catch(err => {
       console.error(`[MergeScheduler] Merge execution error for ${slug}:`, err);
     });
   }, delayMs);
-  
-  const entry: MergeScheduleEntry = {
-    marketSlug: slug,
-    conditionId: market.conditionId,
-    asset: market.asset,
-    expiryTime: expiryMs,
-    mergeTime,
-    timeout,
-    status: 'scheduled',
-  };
-  
-  scheduledMerges.set(slug, entry);
 }
 
 /**
@@ -173,12 +174,13 @@ async function executeMerge(market: V35Market): Promise<void> {
   entry.status = 'executing';
   
   // Get current position from cache (ground truth)
+  // V37.6.3: Use explicit check for 0 since cache returns object with 0 shares
   const position = getCachedPosition(slug);
   
-  const upShares = position?.upShares ?? market.upQty;
-  const downShares = position?.downShares ?? market.downQty;
-  const upCost = position?.upCost ?? market.upCost;
-  const downCost = position?.downCost ?? market.downCost;
+  const upShares = (position && position.upShares > 0) ? position.upShares : market.upQty;
+  const downShares = (position && position.downShares > 0) ? position.downShares : market.downQty;
+  const upCost = (position && position.upCost > 0) ? position.upCost : market.upCost;
+  const downCost = (position && position.downCost > 0) ? position.downCost : market.downCost;
   
   // Create merge candidate
   const candidate = MergeManager.createCandidate(
