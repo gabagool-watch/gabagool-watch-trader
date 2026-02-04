@@ -11,7 +11,7 @@ import { Progress } from '@/components/ui/progress';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { V35LogViewer, V35FillsTable, V35ExportButton, V35StrategyPDFExport, V35OpenPositions, V35LivePriceHeader, V35DecisionLog, V35ExpirySnapshots, V35MarketPnLTable, V35PairLog, V35PairFillTimeTable, V35AnalysisExport } from '@/components/v35';
+import { V35LogViewer, V35FillsTable, V35ExportButton, V35StrategyPDFExport, V35OpenPositions, V35LivePriceHeader, V35DecisionLog, V35ExpirySnapshots, V35MarketPnLTable, V35PairLog, V35PairFillTimeTable, V35AnalysisExport, V35ConfigEditor } from '@/components/v35';
 import { V35UnknownMarketsFixer } from '@/components/v35/V35UnknownMarketsFixer';
 import { toast } from 'sonner';
 import { 
@@ -31,7 +31,8 @@ import {
   AlertTriangle,
   Brain,
   ChevronDown,
-  Layers
+  Layers,
+  Settings
 } from 'lucide-react';
 
 interface RunnerHeartbeat {
@@ -68,6 +69,7 @@ interface V35Settlement {
 }
 
 const TAB_OPTIONS = [
+  { value: 'config', label: 'Config', icon: Settings },
   { value: 'pairs', label: 'Pairs', icon: Layers },
   { value: 'pnl', label: 'P&L', icon: DollarSign },
   { value: 'decisions', label: 'Decisions', icon: Brain },
@@ -391,6 +393,10 @@ export default function V35Dashboard() {
               })}
             </TabsList>
           )}
+
+          <TabsContent value="config">
+            <V35ConfigEditor />
+          </TabsContent>
 
           <TabsContent value="pairs">
             <div className="space-y-6">
