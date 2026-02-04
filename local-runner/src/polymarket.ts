@@ -1316,6 +1316,25 @@ export async function getOrderFillInfo(orderId: string): Promise<{
   }
 }
 
+// ============================================================
+// GET ORDER BY ID (raw)
+// ============================================================
+// Compatibility helper used by V35/V36/V37 modules that need the
+// raw CLOB order payload (e.g. size_matched, price, status).
+//
+// NOTE: This intentionally returns the SDK's raw response shape to
+// avoid re-mapping fields in multiple strategy modules.
+export async function getOrderById(orderId: string): Promise<any | null> {
+  if (!orderId) return null;
+
+  try {
+    const client = await getClient();
+    return await client.getOrder(orderId);
+  } catch (_err) {
+    return null;
+  }
+}
+
 // Invalidate balance cache (call after trades)
 export function invalidateBalanceCache(): void {
   balanceCache = null;
