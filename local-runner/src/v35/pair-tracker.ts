@@ -278,10 +278,18 @@ export class PairTracker {
     // Get expensive price
     const expensiveAsk = expensiveSide === 'UP' ? market.upBestAsk : market.downBestAsk;
     
-    // PRICE GUARD: Check 3-97c range
+    // PRICE GUARD: Check BOTH sides are within 3-97c range
+    // This prevents trades at extreme prices like 1c or 99c
     if (!this.isPriceAcceptable(expensiveAsk)) {
       console.log(`[PairTracker] 🛑 PRICE GUARD: ${expensiveSide} @ $${expensiveAsk.toFixed(2)} outside 3-97c range`);
       return { success: false, error: 'price_outside_range' };
+    }
+    
+    // Calculate cheap side price to check it too
+    const preliminaryMakerPrice = Math.max(0.01, 1.00 - expensiveAsk - this.config.targetMargin);
+    if (!this.isPriceAcceptable(preliminaryMakerPrice)) {
+      console.log(`[PairTracker] 🛑 PRICE GUARD: Maker ${cheapSide} would be $${preliminaryMakerPrice.toFixed(2)} outside 3-97c range`);
+      return { success: false, error: 'maker_price_outside_range' };
     }
     
     // Check if we can open
