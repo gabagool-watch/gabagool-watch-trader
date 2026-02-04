@@ -1,14 +1,17 @@
 // ============================================================
-// V37.6.2 MERGE SCHEDULER
+// V37.7.0 MERGE SCHEDULER
 // ============================================================
 // Schedules merge operations 30 seconds AFTER market expiry.
 // This ensures the market has fully settled before merging
 // paired positions back to USDC.
+//
+// V37.7.0: Fixed snapshot update - now updates DB after merge completes
 // ============================================================
 
 import type { V35Market, V35Asset } from './types.js';
 import { getMergeManager, MergeManager, type MergeCandidate, type MergeResult } from './merge-manager.js';
 import { getCachedPosition } from '../position-cache.js';
+import { saveBotEvent } from '../backend.js';
 
 // ============================================================
 // TYPES
@@ -23,6 +26,13 @@ export interface MergeScheduleEntry {
   timeout: NodeJS.Timeout;
   status: 'scheduled' | 'executing' | 'completed' | 'failed' | 'skipped';
   result?: MergeResult;
+  // V37.7.0: Store market data for PnL logging
+  upShares?: number;
+  downShares?: number;
+  upCost?: number;
+  downCost?: number;
+  upTokenId?: string;
+  downTokenId?: string;
 }
 
 // ============================================================
@@ -53,7 +63,8 @@ export async function initMergeScheduler(): Promise<boolean> {
   
   if (success) {
     initialized = true;
-    console.log('[MergeScheduler] ✅ Initialized');
+    const walletType = mergeManager.getWalletType();
+    console.log(`[MergeScheduler] ✅ Initialized (wallet: ${walletType.toUpperCase()})`);
   } else {
     console.log('[MergeScheduler] ⚠️ Initialization failed - merge disabled');
   }
@@ -94,23 +105,29 @@ export function scheduleMerge(market: V35Market): void {
   const mergeTime = expiryMs + (MERGE_AFTER_EXPIRY_SEC * 1000); // 30s AFTER expiry
   const delayMs = mergeTime - now;
   
-  // Create entry first (before any async operations)
+  // V37.7.0: Store market data for later PnL calculation
   const entry: MergeScheduleEntry = {
     marketSlug: slug,
     conditionId: market.conditionId,
     asset: market.asset,
     expiryTime: expiryMs,
     mergeTime,
-    timeout: null as any, // Will be set below
+    timeout: null as any,
     status: 'scheduled',
+    upShares: market.upQty,
+    downShares: market.downQty,
+    upCost: market.upCost,
+    downCost: market.downCost,
+    upTokenId: market.upTokenId,
+    downTokenId: market.downTokenId,
   };
   
   scheduledMerges.set(slug, entry);
   
-  // Don't schedule if in the past (shouldn't happen)
+  // Don't schedule if in the past
   if (delayMs <= 0) {
     console.log(`[MergeScheduler] ${slug.slice(-25)}: Merge time already passed, executing immediately`);
-    executeMerge(market).catch(err => {
+    executeMergeFromEntry(entry).catch(err => {
       console.error(`[MergeScheduler] Immediate merge error for ${slug}:`, err);
     });
     return;
@@ -120,7 +137,7 @@ export function scheduleMerge(market: V35Market): void {
   console.log(`[MergeScheduler] Scheduled merge for ${slug.slice(-25)} in ${(delayMs / 1000).toFixed(0)}s (expiry in ${secsUntilExpiry.toFixed(0)}s + 30s wait)`)
   
   entry.timeout = setTimeout(() => {
-    executeMerge(market).catch(err => {
+    executeMergeFromEntry(entry).catch(err => {
       console.error(`[MergeScheduler] Merge execution error for ${slug}:`, err);
     });
   }, delayMs);
@@ -154,16 +171,10 @@ export function cancelAllMerges(): void {
 // ============================================================
 
 /**
- * Execute merge for a market
+ * Execute merge using stored entry data (V37.7.0)
  */
-async function executeMerge(market: V35Market): Promise<void> {
-  const slug = market.slug;
-  const entry = scheduledMerges.get(slug);
-  
-  if (!entry) {
-    console.log(`[MergeScheduler] No entry found for ${slug}`);
-    return;
-  }
+async function executeMergeFromEntry(entry: MergeScheduleEntry): Promise<void> {
+  const slug = entry.marketSlug;
   
   if (!initialized || !mergeManager) {
     console.log(`[MergeScheduler] Merge manager not initialized, skipping ${slug}`);
@@ -173,34 +184,33 @@ async function executeMerge(market: V35Market): Promise<void> {
   
   entry.status = 'executing';
   
-  // Get current position from cache (ground truth)
-  // V37.6.3: Use explicit check for 0 since cache returns object with 0 shares
+  // V37.7.0: Use cached position if available, fall back to stored entry data
   const position = getCachedPosition(slug);
   
-  const upShares = (position && position.upShares > 0) ? position.upShares : market.upQty;
-  const downShares = (position && position.downShares > 0) ? position.downShares : market.downQty;
-  const upCost = (position && position.upCost > 0) ? position.upCost : market.upCost;
-  const downCost = (position && position.downCost > 0) ? position.downCost : market.downCost;
+  const upShares = (position && position.upShares > 0) ? position.upShares : (entry.upShares ?? 0);
+  const downShares = (position && position.downShares > 0) ? position.downShares : (entry.downShares ?? 0);
+  const upCost = (position && position.upCost > 0) ? position.upCost : (entry.upCost ?? 0);
+  const downCost = (position && position.downCost > 0) ? position.downCost : (entry.downCost ?? 0);
   
-  // Create merge candidate
+  // Create merge candidate with token IDs for balance verification
   const candidate = MergeManager.createCandidate(
-    market.conditionId,
+    entry.conditionId,
     slug,
-    market.asset,
+    entry.asset,
     upShares,
     downShares,
     upCost,
-    downCost
+    downCost,
+    entry.upTokenId,
+    entry.downTokenId
   );
   
   if (!candidate) {
     console.log(`[MergeScheduler] ${slug.slice(-25)}: No paired shares, skipping merge`);
     entry.status = 'skipped';
     entry.result = { success: false, mergedShares: 0, error: 'no_paired_shares' };
-    
-    if (mergeCallback) {
-      mergeCallback(slug, entry.result);
-    }
+    logMergeEvent(entry, 'skipped');
+    if (mergeCallback) mergeCallback(slug, entry.result);
     return;
   }
   
@@ -208,10 +218,8 @@ async function executeMerge(market: V35Market): Promise<void> {
     console.log(`[MergeScheduler] ${slug.slice(-25)}: Only ${candidate.pairedShares} paired (min: ${MIN_PAIRED_SHARES}), skipping`);
     entry.status = 'skipped';
     entry.result = { success: false, mergedShares: 0, error: 'below_minimum' };
-    
-    if (mergeCallback) {
-      mergeCallback(slug, entry.result);
-    }
+    logMergeEvent(entry, 'skipped');
+    if (mergeCallback) mergeCallback(slug, entry.result);
     return;
   }
   
@@ -220,10 +228,8 @@ async function executeMerge(market: V35Market): Promise<void> {
     console.log(`[MergeScheduler] ${slug.slice(-25)}: CPP >= $1.00, skipping unprofitable merge`);
     entry.status = 'skipped';
     entry.result = { success: false, mergedShares: 0, error: 'unprofitable' };
-    
-    if (mergeCallback) {
-      mergeCallback(slug, entry.result);
-    }
+    logMergeEvent(entry, 'skipped');
+    if (mergeCallback) mergeCallback(slug, entry.result);
     return;
   }
   
@@ -234,15 +240,43 @@ async function executeMerge(market: V35Market): Promise<void> {
   entry.result = result;
   
   if (result.success) {
-    console.log(`[MergeScheduler] ✅ ${slug.slice(-25)}: Merged ${result.mergedShares} pairs`);
+    console.log(`[MergeScheduler] ✅ ${slug.slice(-25)}: Merged ${result.mergedShares} pairs, PnL: $${(result.realizedPnl ?? 0).toFixed(2)}`);
+    logMergeEvent(entry, 'completed');
   } else {
     console.log(`[MergeScheduler] ❌ ${slug.slice(-25)}: Merge failed - ${result.error}`);
+    logMergeEvent(entry, 'failed');
   }
   
   // Notify callback
   if (mergeCallback) {
     mergeCallback(slug, result);
   }
+}
+
+/**
+ * Log merge event to database for PnL tracking (V37.7.0)
+ */
+function logMergeEvent(entry: MergeScheduleEntry, outcome: 'completed' | 'failed' | 'skipped'): void {
+  const result = entry.result;
+  saveBotEvent({
+    event_type: 'MERGE_EXECUTION',
+    asset: entry.asset,
+    market_id: entry.marketSlug,
+    ts: Date.now(),
+    data: {
+      outcome,
+      mergedShares: result?.mergedShares ?? 0,
+      realizedPnl: result?.realizedPnl ?? 0,
+      txHash: result?.txHash,
+      gasUsed: result?.gasUsed,
+      error: result?.error,
+      walletType: result?.walletType,
+      upShares: entry.upShares,
+      downShares: entry.downShares,
+      upCost: entry.upCost,
+      downCost: entry.downCost,
+    },
+  }).catch(() => {});
 }
 
 // ============================================================
