@@ -294,144 +294,166 @@ Deno.serve(async (req) => {
           'X-Original-Content-Type': contentType,
         },
       })
-    } else if (exportType === 'all') {
-      // Export ALL data in one combined JSON file
-      console.log('[data-export] Fetching all data types...')
+    } else if (exportType === 'market-analysis') {
+      // Export: Market Analysis - Last 30 days from market_history
+      // Combines: start_time, price_at_start, winning_side, up_ask_at_1min, down_ask_at_1min
+      const daysParam = url.searchParams.get('days') || '30'
+      const days = parseInt(daysParam, 10)
+      const asset = url.searchParams.get('asset') || 'BTC'
+      const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
 
-      // 1. Price Ticks
-      const allTicks: Array<Record<string, unknown>> = []
-      let offset = 0
-      const batchSize = 10000
-      while (true) {
-        const { data, error } = await supabase
-          .from('v35_price_ticks')
-          .select('ts, market_slug, spot_price, up_best_bid, up_best_ask, down_best_bid, down_best_ask')
-          .gte('created_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
-          .order('ts', { ascending: true })
-          .range(offset, offset + batchSize - 1)
-        if (error) throw error
-        if (!data || data.length === 0) break
-        for (const row of data) {
-          allTicks.push({
-            timestamp_ms: row.ts,
-            market_slug: row.market_slug,
-            spot_price: row.spot_price,
-            up_best_bid: row.up_best_bid,
-            up_best_ask: row.up_best_ask,
-            down_best_bid: row.down_best_bid,
-            down_best_ask: row.down_best_ask,
-          })
-        }
-        console.log(`[data-export] all/price-ticks: ${offset + data.length} rows`)
-        if (data.length < batchSize) break
-        offset += batchSize
+      console.log(`[data-export] market-analysis: fetching ${asset} markets from last ${days} days`)
+
+      // Get markets from market_history (has winning_side/result and strike_price)
+      const { data: markets, error: marketsError } = await supabase
+        .from('market_history')
+        .select('slug, event_start_time, strike_price, open_price, result')
+        .eq('asset', asset)
+        .gte('event_start_time', cutoff)
+        .not('event_start_time', 'is', null)
+        .order('event_start_time', { ascending: false })
+
+      if (marketsError) throw marketsError
+
+      console.log(`[data-export] market-analysis: ${markets?.length || 0} markets found in market_history`)
+
+      // Get all ticks for the period from v35_price_ticks
+      const { data: v35Ticks } = await supabase
+        .from('v35_price_ticks')
+        .select('market_slug, created_at, ts, up_best_ask, down_best_ask, spot_price')
+        .eq('asset', asset)
+        .gte('created_at', cutoff)
+        .order('created_at', { ascending: true })
+
+      console.log(`[data-export] market-analysis: ${v35Ticks?.length || 0} v35_price_ticks found`)
+
+      // Get paper_price_snapshots as fallback
+      const { data: paperTicks } = await supabase
+        .from('paper_price_snapshots')
+        .select('market_slug, created_at, up_best_ask, down_best_ask, binance_price')
+        .eq('asset', asset)
+        .order('created_at', { ascending: true })
+
+      console.log(`[data-export] market-analysis: ${paperTicks?.length || 0} paper_price_snapshots found`)
+
+      // Build lookup maps
+      const v35TicksByMarket = new Map<string, typeof v35Ticks>()
+      for (const tick of (v35Ticks || [])) {
+        const existing = v35TicksByMarket.get(tick.market_slug) || []
+        existing.push(tick)
+        v35TicksByMarket.set(tick.market_slug, existing)
       }
 
-      // 2. Market Windows
-      const { data: snapshots } = await supabase
-        .from('v35_expiry_snapshots')
-        .select('market_slug, expiry_time, predicted_winning_side')
-        .gte('created_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
-        .order('expiry_time', { ascending: true })
+      const paperTicksByMarket = new Map<string, typeof paperTicks>()
+      for (const tick of (paperTicks || [])) {
+        const existing = paperTicksByMarket.get(tick.market_slug) || []
+        existing.push(tick)
+        paperTicksByMarket.set(tick.market_slug, existing)
+      }
 
-      const marketWindows: Array<Record<string, unknown>> = []
-      const firstMinStats: Array<Record<string, unknown>> = []
+      // Helper function
+      function findTickAt1Min(
+        ticks: Array<{ created_at: string; up_best_ask: number; down_best_ask: number }> | undefined | null, 
+        startTime: Date
+      ): { up_ask: number | null; down_ask: number | null } | null {
+        if (!ticks || ticks.length === 0) return null
+        const targetTime = new Date(startTime.getTime() + 60 * 1000)
+        const minTime = new Date(startTime.getTime() + 50 * 1000)
+        const maxTime = new Date(startTime.getTime() + 90 * 1000)
 
-      for (const snapshot of (snapshots || [])) {
-        const expiryTime = new Date(snapshot.expiry_time)
-        const startTime = new Date(expiryTime.getTime() - 15 * 60 * 1000)
-        const oneMinLater = new Date(startTime.getTime() + 60 * 1000)
-        const startMs = startTime.getTime()
-        const oneMinMs = oneMinLater.getTime()
-
-        // Get first tick (strike)
-        const { data: firstTick } = await supabase
-          .from('v35_price_ticks')
-          .select('spot_price')
-          .eq('market_slug', snapshot.market_slug)
-          .order('ts', { ascending: true })
-          .limit(1)
-          .single()
-
-        // Get last tick (settlement)
-        const { data: lastTick } = await supabase
-          .from('v35_price_ticks')
-          .select('spot_price')
-          .eq('market_slug', snapshot.market_slug)
-          .order('ts', { ascending: false })
-          .limit(1)
-          .single()
-
-        marketWindows.push({
-          market_slug: snapshot.market_slug,
-          start_time: startTime.toISOString(),
-          expiry_time: snapshot.expiry_time,
-          strike_price: firstTick?.spot_price ?? null,
-          settlement_price: lastTick?.spot_price ?? null,
-          winning_side: snapshot.predicted_winning_side,
+        const ticksInWindow = ticks.filter(t => {
+          const tickTime = new Date(t.created_at)
+          return tickTime >= minTime && tickTime <= maxTime
         })
 
-        // 3. First Minute Stats for this market
-        const { data: firstMinTicks } = await supabase
-          .from('v35_price_ticks')
-          .select('spot_price, up_best_ask, down_best_ask, ts')
-          .eq('market_slug', snapshot.market_slug)
-          .gte('ts', startMs)
-          .lte('ts', oneMinMs)
-          .order('ts', { ascending: true })
+        if (ticksInWindow.length === 0) return null
 
-        if (!firstMinTicks || firstMinTicks.length === 0) {
-          firstMinStats.push({
-            market_slug: snapshot.market_slug,
-            start_time: startTime.toISOString(),
-            winning_side: snapshot.predicted_winning_side,
-            first_min_open_price: null,
-            first_min_close_price: null,
-            first_min_high: null,
-            first_min_low: null,
-            first_min_tick_count: 0,
-            up_ask_at_1min: null,
-            down_ask_at_1min: null,
-          })
-        } else {
-          const prices = firstMinTicks.map(t => t.spot_price).filter(p => p != null) as number[]
-          const last = firstMinTicks[firstMinTicks.length - 1]
-          firstMinStats.push({
-            market_slug: snapshot.market_slug,
-            start_time: startTime.toISOString(),
-            winning_side: snapshot.predicted_winning_side,
-            first_min_open_price: firstMinTicks[0].spot_price,
-            first_min_close_price: last.spot_price,
-            first_min_high: prices.length > 0 ? Math.max(...prices) : null,
-            first_min_low: prices.length > 0 ? Math.min(...prices) : null,
-            first_min_tick_count: firstMinTicks.length,
-            up_ask_at_1min: last.up_best_ask,
-            down_ask_at_1min: last.down_best_ask,
-          })
+        let closest = ticksInWindow[0]
+        let closestDiff = Math.abs(new Date(closest.created_at).getTime() - targetTime.getTime())
+
+        for (const tick of ticksInWindow) {
+          const diff = Math.abs(new Date(tick.created_at).getTime() - targetTime.getTime())
+          if (diff < closestDiff) {
+            closest = tick
+            closestDiff = diff
+          }
+        }
+
+        return { up_ask: closest.up_best_ask, down_ask: closest.down_best_ask }
+      }
+
+      // Build result
+      const results: Array<{
+        market_slug: string
+        start_time: string
+        price_at_start: number | null
+        winning_side: string | null
+        up_ask_at_1min: number | null
+        down_ask_at_1min: number | null
+        data_source: string
+      }> = []
+
+      for (const market of (markets || [])) {
+        const startTime = new Date(market.event_start_time)
+        const v35TicksForMarket = v35TicksByMarket.get(market.slug) || null
+        const v35Tick = findTickAt1Min(v35TicksForMarket, startTime)
+        const paperTicksForMarket = paperTicksByMarket.get(market.slug) || null
+        const paperTick = v35Tick ? null : findTickAt1Min(paperTicksForMarket, startTime)
+        const oneMinData = v35Tick || paperTick
+
+        results.push({
+          market_slug: market.slug,
+          start_time: market.event_start_time,
+          price_at_start: market.strike_price || market.open_price || null,
+          winning_side: market.result || null,
+          up_ask_at_1min: oneMinData?.up_ask || null,
+          down_ask_at_1min: oneMinData?.down_ask || null,
+          data_source: v35Tick ? 'v35_price_ticks' : (paperTick ? 'paper_price_snapshots' : 'none')
+        })
+      }
+
+      const summary = {
+        export_time: new Date().toISOString(),
+        days_exported: days,
+        asset,
+        total_markets: results.length,
+        markets_with_1min_data: results.filter(r => r.up_ask_at_1min !== null).length,
+        data_sources: {
+          v35_price_ticks: results.filter(r => r.data_source === 'v35_price_ticks').length,
+          paper_price_snapshots: results.filter(r => r.data_source === 'paper_price_snapshots').length,
+          none: results.filter(r => r.data_source === 'none').length,
         }
       }
 
-      console.log(`[data-export] all: ${allTicks.length} ticks, ${marketWindows.length} windows, ${firstMinStats.length} first-min stats`)
+      console.log(`[data-export] market-analysis: summary`, summary)
 
-      const combined = {
-        generated_at: new Date().toISOString(),
-        period_days: 7,
-        price_ticks: allTicks,
-        market_windows: marketWindows,
-        first_minute_stats: firstMinStats,
+      let content: string
+      let filename: string
+
+      if (format === 'csv') {
+        const headers = ['market_slug', 'start_time', 'price_at_start', 'winning_side', 'up_ask_at_1min', 'down_ask_at_1min', 'data_source']
+        const csvRows = [
+          headers.join(','),
+          ...results.map(r => headers.map(h => r[h as keyof typeof r] ?? '').join(','))
+        ]
+        content = csvRows.join('\n')
+        filename = `market-analysis-${asset}-${days}d.csv.gz`
+      } else {
+        content = JSON.stringify({ summary, markets: results })
+        filename = `market-analysis-${asset}-${days}d.json.gz`
       }
 
-      return new Response(gzipStream(JSON.stringify(combined)), {
+      return new Response(gzipStream(content), {
         headers: {
           ...corsHeaders,
           'Content-Type': 'application/gzip',
-          'Content-Disposition': 'attachment; filename="all-data-7d.json.gz"',
-          'X-Original-Content-Type': 'application/json',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          'X-Original-Content-Type': format === 'csv' ? 'text/csv' : 'application/json',
         },
       })
     }
 
-    return new Response(JSON.stringify({ error: 'Invalid export type. Use: price-ticks, market-windows, first-minute-stats, or all' }), {
+    return new Response(JSON.stringify({ error: 'Invalid export type. Use: price-ticks, market-windows, first-minute-stats, all, or market-analysis' }), {
       status: 400,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
