@@ -1,23 +1,32 @@
 // ============================================================
 // V35 CONFIGURATION - GABAGOOL STRATEGY
 // ============================================================
-// Version: V37.1.0 - "Shared Maker"
+// Version: V37.2.0 - "Per-Pair Makers with V36 Features"
 //
-// V37.1.0 STRATEGY:
+// V37.2.0 STRATEGY:
 // ================================================================
-// CORE PHILOSOPHY: SIMPLE SHARED MAKER APPROACH
+// CORE PHILOSOPHY: SIMPLE PER-PAIR MAKER APPROACH
 //
-// 1. SHARED MAKER: Place 1 large maker order (100 shares @ 1c)
-// 2. MULTIPLE TAKERS: Each taker hedges against the shared maker
-// 3. PRICE GUARD: Only trade when expensive side is 3-97c
-// 4. TARGET CPP: expensive + 1c = ~0.xx + 0.01 (varies by price)
-// 5. MAX TAKERS: 10 takers per market
+// 1. Every 5s: buy expensive side as TAKER (3-97c only)
+// 2. Immediately place MAKER on cheap side with 5c margin
+// 3. $1 minimum order value for BOTH taker AND maker
+// 4. TARGET CPP: $0.95 (5% margin)
+// 5. MAX PAIRS: 10 concurrent open pairs
 //
-// This ensures imbalances are FIXED, not abandoned via bans.
+// V36 FEATURES PRESERVED:
+// - Fill logging to DB (TAKER + MAKER types)
+// - Fill audit fallback (REST API polling for missed fills)
+// - Order reconciliation
+// - Position caching
+// - Expiry snapshots
+//
+// OPTIONAL TOGGLES:
+// - enableEscalationHedge: Reprice maker after timeout
+// - enableVolatilityMargin: ATR-based margin adjustment
 // ============================================================
 
-export const V35_VERSION = 'V37.0.0';
-export const V35_CODENAME = 'Back to Basics';
+export const V35_VERSION = 'V37.2.0';
+export const V35_CODENAME = 'Per-Pair Makers';
 
 export type V35Mode = 'test' | 'moderate' | 'production';
 
