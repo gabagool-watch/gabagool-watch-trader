@@ -1,22 +1,17 @@
 // ============================================================
 // V35 CONFIGURATION - GABAGOOL STRATEGY
 // ============================================================
-// Version: V35.11.0 - "Never Ban, Always Fix"
+// Version: V37.1.0 - "Shared Maker"
 //
-// V35.11.0 CRITICAL CHANGES:
+// V37.1.0 STRATEGY:
 // ================================================================
-// CORE PHILOSOPHY: NEVER BAN A MARKET, ALWAYS FIX THE IMBALANCE
+// CORE PHILOSOPHY: SIMPLE SHARED MAKER APPROACH
 //
-// 1. PRE-TRADE CHECK: Before any fill, verify hedge is possible
-//    - If hedge side ask > viability cap → BLOCK the fill side FIRST
-// 2. POST-FILL BLOCK: After hedge fails, immediately block leading side
-//    - Leading side stays blocked until gap < 5 shares
-// 3. 30% LOSS TOLERANCE: Accept up to 30% loss to fix imbalance
-//    - emergencyMaxCost = 1.30 (was 1.20)
-// 4. NO MARKET BANNING: Circuit breaker never bans, only blocks leading
-//    - Keeps trying to rebalance until expiry
-// 5. CONTINUOUS REBALANCING: Rebalancer runs every 500ms
-//    - Always buying lagging side to close gap
+// 1. SHARED MAKER: Place 1 large maker order (100 shares @ 1c)
+// 2. MULTIPLE TAKERS: Each taker hedges against the shared maker
+// 3. PRICE GUARD: Only trade when expensive side is 3-97c
+// 4. TARGET CPP: expensive + 1c = ~0.xx + 0.01 (varies by price)
+// 5. MAX TAKERS: 10 takers per market
 //
 // This ensures imbalances are FIXED, not abandoned via bans.
 // ============================================================
