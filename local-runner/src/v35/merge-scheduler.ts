@@ -1,9 +1,9 @@
 // ============================================================
-// V37.4.0 MERGE SCHEDULER
+// V37.6.2 MERGE SCHEDULER
 // ============================================================
-// Schedules merge operations 10 seconds before market expiry.
-// Executes merge at 10-5 seconds before expiry, capturing paired
-// positions and converting them back to USDC.
+// Schedules merge operations 30 seconds AFTER market expiry.
+// This ensures the market has fully settled before merging
+// paired positions back to USDC.
 // ============================================================
 
 import type { V35Market, V35Asset } from './types.js';
@@ -19,7 +19,7 @@ export interface MergeScheduleEntry {
   conditionId: string;
   asset: V35Asset;
   expiryTime: number;     // ms timestamp
-  mergeTime: number;      // When to trigger merge (10s before expiry)
+  mergeTime: number;      // When to trigger merge (30s AFTER expiry)
   timeout: NodeJS.Timeout;
   status: 'scheduled' | 'executing' | 'completed' | 'failed' | 'skipped';
   result?: MergeResult;
@@ -38,8 +38,8 @@ let initialized = false;
 // CONFIGURATION
 // ============================================================
 
-const MERGE_BEFORE_EXPIRY_SEC = 10; // Trigger merge 10 seconds before expiry
-const MIN_PAIRED_SHARES = 5;        // Minimum paired shares to trigger merge
+const MERGE_AFTER_EXPIRY_SEC = 30; // Trigger merge 30 seconds AFTER expiry
+const MIN_PAIRED_SHARES = 5;       // Minimum paired shares to trigger merge
 
 // ============================================================
 // INITIALIZATION
@@ -79,7 +79,7 @@ export function setMergeCallback(callback: (slug: string, result: MergeResult) =
 
 /**
  * Schedule a merge operation for a market
- * Will trigger 10 seconds before expiry
+ * Will trigger 30 seconds AFTER expiry
  */
 export function scheduleMerge(market: V35Market): void {
   const slug = market.slug;
@@ -91,16 +91,20 @@ export function scheduleMerge(market: V35Market): void {
   
   const now = Date.now();
   const expiryMs = market.expiry.getTime();
-  const mergeTime = expiryMs - (MERGE_BEFORE_EXPIRY_SEC * 1000);
+  const mergeTime = expiryMs + (MERGE_AFTER_EXPIRY_SEC * 1000); // 30s AFTER expiry
   const delayMs = mergeTime - now;
   
-  // Don't schedule if already past merge time
+  // Don't schedule if in the past (shouldn't happen)
   if (delayMs <= 0) {
-    console.log(`[MergeScheduler] ${slug.slice(-25)}: Already past merge window, skipping`);
+    console.log(`[MergeScheduler] ${slug.slice(-25)}: Merge time already passed, executing immediately`);
+    executeMerge(market).catch(err => {
+      console.error(`[MergeScheduler] Immediate merge error for ${slug}:`, err);
+    });
     return;
   }
   
-  console.log(`[MergeScheduler] Scheduled merge for ${slug.slice(-25)} in ${(delayMs / 1000).toFixed(0)}s`);
+  const secsUntilExpiry = Math.max(0, (expiryMs - now) / 1000);
+  console.log(`[MergeScheduler] Scheduled merge for ${slug.slice(-25)} in ${(delayMs / 1000).toFixed(0)}s (expiry in ${secsUntilExpiry.toFixed(0)}s + 30s wait)`)
   
   const timeout = setTimeout(() => {
     executeMerge(market).catch(err => {
