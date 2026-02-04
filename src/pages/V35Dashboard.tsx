@@ -12,6 +12,7 @@ import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { V35LogViewer, V35FillsTable, V35ExportButton, V35StrategyPDFExport, V35OpenPositions, V35LivePriceHeader, V35DecisionLog, V35ExpirySnapshots, V35MarketPnLTable, V35PairLog, V35PairFillTimeTable, V35AnalysisExport } from '@/components/v35';
+import { V35UnknownMarketsFixer } from '@/components/v35/V35UnknownMarketsFixer';
 import { toast } from 'sonner';
 import { 
   Activity, 
@@ -399,7 +400,10 @@ export default function V35Dashboard() {
           </TabsContent>
 
           <TabsContent value="pnl">
-            <V35MarketPnLTable />
+            <div className="space-y-6">
+              <V35UnknownMarketsFixer />
+              <V35MarketPnLTable />
+            </div>
           </TabsContent>
 
           <TabsContent value="decisions">
