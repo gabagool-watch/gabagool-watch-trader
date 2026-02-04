@@ -20,6 +20,7 @@ interface UnknownMarket {
 export function V35UnknownMarketsFixer() {
   const queryClient = useQueryClient();
   const [fixingSlug, setFixingSlug] = useState<string | null>(null);
+  const [showManualButtons, setShowManualButtons] = useState<string | null>(null);
 
   // Fetch unknown markets
   const { data: unknownMarkets, isLoading, refetch } = useQuery({
@@ -96,7 +97,7 @@ export function V35UnknownMarketsFixer() {
     onSuccess: (data, variables) => {
       toast.success(`Market ${variables.slug} set to ${variables.result}`);
       queryClient.invalidateQueries({ queryKey: ['unknown-markets'] });
-      setFixingSlug(null);
+      setShowManualButtons(null);
     },
     onError: (error) => {
       toast.error(`Manual fix failed: ${error.message}`);
@@ -105,10 +106,14 @@ export function V35UnknownMarketsFixer() {
 
   const handleAutoFix = async (slug: string) => {
     setFixingSlug(slug);
-    const result = await autoFixMutation.mutateAsync(slug);
-    if (!result.autoFixed) {
-      // Keep fixingSlug set to show manual buttons
-    } else {
+    setShowManualButtons(null);
+    try {
+      const result = await autoFixMutation.mutateAsync(slug);
+      if (!result.autoFixed) {
+        // Auto-fix failed, show manual buttons
+        setShowManualButtons(slug);
+      }
+    } finally {
       setFixingSlug(null);
     }
   };
@@ -205,8 +210,13 @@ export function V35UnknownMarketsFixer() {
 
             <div className="flex items-center gap-2 ml-4">
               {fixingSlug === market.slug ? (
+                // Loading state while checking oracle data
+                <Button size="sm" variant="secondary" disabled>
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                </Button>
+              ) : showManualButtons === market.slug ? (
+                // Manual fix buttons (only shown after auto-fix fails)
                 <>
-                  {/* Show manual fix buttons */}
                   <Button
                     size="sm"
                     variant="outline"
@@ -237,20 +247,14 @@ export function V35UnknownMarketsFixer() {
                   </a>
                 </>
               ) : (
-                <>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => handleAutoFix(market.slug)}
-                    disabled={autoFixMutation.isPending && fixingSlug === market.slug}
-                  >
-                    {autoFixMutation.isPending && fixingSlug === market.slug ? (
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                    ) : (
-                      'Fix'
-                    )}
-                  </Button>
-                </>
+                // Default: Fix button
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => handleAutoFix(market.slug)}
+                >
+                  Fix
+                </Button>
               )}
             </div>
           </div>
