@@ -15,3 +15,4 @@ export { V35MarketPriceChart } from './V35MarketPriceChart';
 export { V35PairFillTimeTable } from './V35PairFillTimeTable';
 export { V35AnalysisExport } from './V35AnalysisExport';
 export { V35ConfigEditor } from './V35ConfigEditor';
+export { V35MiniSharesChart } from './V35MiniSharesChart';
