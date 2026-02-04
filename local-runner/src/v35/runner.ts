@@ -51,6 +51,8 @@ import { buildCombinedBook, logCombinedBook } from './combined-book.js';
 // V36.1: Pair-based market making with Binance stop-loss
 import { getPairTracker, resetPairTracker } from './pair-tracker.js';
 import { getReversalDetector, resetReversalDetector } from './reversal-detector.js';
+// V37.3.0: Hot-reload configuration from database
+import { startHotReload, stopHotReload, getHotConfig, onConfigChange, isStrategyEnabled, getConfigVersion } from './hot-reload.js';
 // Expiry snapshot scheduler - captures market state exactly 1 second before expiry
 import { scheduleExpirySnapshot, cancelExpirySnapshot, cancelAllExpirySnapshots, setSnapshotCallback } from './expiry-snapshot.js';
 import { ensureValidCredentials, getBalance, getOpenOrders } from '../polymarket.js';
@@ -1131,6 +1133,31 @@ async function main(): Promise<void> {
     log('🧪 DRY RUN MODE - No real orders will be placed');
   }
   
+  // =========================================================================
+  // V37.3.0: HOT-RELOAD - Live config updates from database
+  // =========================================================================
+  log('🔄 Starting hot-reload service (config updates from database)...');
+  const hotConfig = await startHotReload();
+  log(`✅ Hot-reload active - config v${getConfigVersion()}`);
+  
+  // Register callback for config changes
+  onConfigChange((newConfig, prevConfig) => {
+    log(`🔄 Config updated: v${newConfig.config_version}`);
+    
+    // If strategy was disabled, pause trading
+    if (prevConfig?.strategy_enabled && !newConfig.strategy_enabled) {
+      log('⚠️  Strategy DISABLED via hot-reload - pausing trading');
+      paused = true;
+    } else if (!prevConfig?.strategy_enabled && newConfig.strategy_enabled) {
+      log('✅ Strategy ENABLED via hot-reload - resuming trading');
+      paused = false;
+    }
+    
+    // Update pair tracker config on next iteration
+    const tracker = getPairTracker();
+    tracker.updateFromHotConfig(newConfig);
+  });
+  
   // Set runner identity for order-guard (authorizes V35 to place orders)
   setRunnerIdentity('v35');
   
@@ -1398,6 +1425,8 @@ async function main(): Promise<void> {
     clearInterval(heartbeatInterval);
     clearInterval(leaseRenewInterval);
     clearInterval(orderbookFlushInterval);
+    // Stop hot-reload
+    stopHotReload();
     // Stop auto-claim loop
     stopAutoClaimLoop();
     // Stop price feed logger

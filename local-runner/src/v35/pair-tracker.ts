@@ -28,6 +28,7 @@ import { logPairEvent, saveV35Fill } from './backend.js';
 import { getV35Config } from './config.js';
 import { registerOurOrderId } from './user-ws.js';
 import { calculateDynamicMargin, isVolatilityMarginEnabled, getMarginSummary } from './dynamic-margin.js';
+import { getHotConfig, type HotReloadConfig } from './hot-reload.js';
 
 // ============================================================
 // TYPES
@@ -139,6 +140,34 @@ export class PairTracker {
   
   constructor(config: Partial<PairTrackerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+  
+  // ============================================================
+  // HOT-RELOAD CONFIG UPDATE
+  // ============================================================
+  
+  /**
+   * Update config from hot-reload system (live updates from database)
+   */
+  updateFromHotConfig(hotConfig: HotReloadConfig): void {
+    console.log(`[PairTracker] Applying hot-reload config v${hotConfig.config_version}`);
+    
+    this.config = {
+      ...this.config,
+      maxOpenPairs: hotConfig.pair_limit,
+      targetMargin: 1.00 - hotConfig.cpp_target, // CPP 0.95 → margin 0.05
+      minSharesPerTaker: hotConfig.min_lot_shares,
+      maxSharesPerTaker: hotConfig.base_lot_shares * 2,
+      minExpensivePrice: hotConfig.price_guard_min,
+      maxExpensivePrice: hotConfig.price_guard_max,
+      enableEscalationHedge: hotConfig.enable_escalation_hedge,
+      enableVolatilityMargin: hotConfig.enable_volatility_margin,
+      escalationTimeoutMs: hotConfig.escalation_timeout_ms,
+      escalationPriceIncrement: hotConfig.escalation_reprice_ticks * 0.01,
+      fillAuditIntervalMs: hotConfig.fill_audit_interval_ms,
+    };
+    
+    console.log(`[PairTracker] Config updated: pairLimit=${this.config.maxOpenPairs}, margin=${(this.config.targetMargin * 100).toFixed(1)}¢, priceGuard=${this.config.minExpensivePrice}-${this.config.maxExpensivePrice}`);
   }
   
   // ============================================================

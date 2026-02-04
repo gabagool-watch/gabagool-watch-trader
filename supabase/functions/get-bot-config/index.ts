@@ -29,10 +29,36 @@ Deno.serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Fetch bot config
+    // Fetch bot config with all V37 fields
     const { data, error } = await supabase
       .from('bot_config')
-      .select('*')
+      .select(`
+        *,
+        cpp_target,
+        price_guard_min,
+        price_guard_max,
+        pair_limit,
+        base_lot_shares,
+        min_lot_shares,
+        enable_escalation_hedge,
+        enable_volatility_margin,
+        enable_fill_audit,
+        max_shares_per_side,
+        max_total_shares_per_market,
+        max_notional_per_market,
+        global_max_notional,
+        stop_new_trades_sec,
+        hedge_timeout_sec,
+        hedge_must_by_sec,
+        escalation_timeout_ms,
+        escalation_reprice_ticks,
+        volatility_atr_period,
+        volatility_margin_multiplier,
+        fill_audit_interval_ms,
+        config_reload_interval_ms,
+        config_version,
+        last_reload_requested_at
+      `)
       .eq('id', '00000000-0000-0000-0000-000000000001')
       .single();
 
@@ -44,7 +70,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    console.log('✅ Bot config fetched successfully');
+    console.log(`✅ Bot config v${data?.config_version || 1} fetched successfully`);
 
     // Return raw bot_config row (what ResolvedConfig expects)
     return new Response(

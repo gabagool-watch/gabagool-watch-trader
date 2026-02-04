@@ -251,52 +251,124 @@ export type Database = {
       bot_config: {
         Row: {
           backend_url: string | null
+          base_lot_shares: number | null
           cloudflare_backoff_ms: number | null
+          config_reload_interval_ms: number | null
+          config_version: number | null
+          cpp_target: number | null
           created_at: string | null
+          enable_escalation_hedge: boolean | null
+          enable_fill_audit: boolean | null
+          enable_volatility_margin: boolean | null
+          escalation_reprice_ticks: number | null
+          escalation_timeout_ms: number | null
+          fill_audit_interval_ms: number | null
+          global_max_notional: number | null
+          hedge_must_by_sec: number | null
+          hedge_timeout_sec: number | null
           id: string
+          last_reload_requested_at: string | null
+          max_notional_per_market: number | null
           max_notional_per_trade: number | null
           max_position_size: number | null
+          max_shares_per_side: number | null
+          max_total_shares_per_market: number | null
           min_edge_threshold: number | null
+          min_lot_shares: number | null
           min_order_interval_ms: number | null
           opening_max_price: number | null
+          pair_limit: number | null
           polymarket_address: string | null
+          price_guard_max: number | null
+          price_guard_min: number | null
+          stop_new_trades_sec: number | null
           strategy_enabled: boolean | null
           trade_assets: string[] | null
           updated_at: string | null
+          volatility_atr_period: number | null
+          volatility_margin_multiplier: number | null
           vpn_endpoint: string | null
           vpn_required: boolean | null
         }
         Insert: {
           backend_url?: string | null
+          base_lot_shares?: number | null
           cloudflare_backoff_ms?: number | null
+          config_reload_interval_ms?: number | null
+          config_version?: number | null
+          cpp_target?: number | null
           created_at?: string | null
+          enable_escalation_hedge?: boolean | null
+          enable_fill_audit?: boolean | null
+          enable_volatility_margin?: boolean | null
+          escalation_reprice_ticks?: number | null
+          escalation_timeout_ms?: number | null
+          fill_audit_interval_ms?: number | null
+          global_max_notional?: number | null
+          hedge_must_by_sec?: number | null
+          hedge_timeout_sec?: number | null
           id?: string
+          last_reload_requested_at?: string | null
+          max_notional_per_market?: number | null
           max_notional_per_trade?: number | null
           max_position_size?: number | null
+          max_shares_per_side?: number | null
+          max_total_shares_per_market?: number | null
           min_edge_threshold?: number | null
+          min_lot_shares?: number | null
           min_order_interval_ms?: number | null
           opening_max_price?: number | null
+          pair_limit?: number | null
           polymarket_address?: string | null
+          price_guard_max?: number | null
+          price_guard_min?: number | null
+          stop_new_trades_sec?: number | null
           strategy_enabled?: boolean | null
           trade_assets?: string[] | null
           updated_at?: string | null
+          volatility_atr_period?: number | null
+          volatility_margin_multiplier?: number | null
           vpn_endpoint?: string | null
           vpn_required?: boolean | null
         }
         Update: {
           backend_url?: string | null
+          base_lot_shares?: number | null
           cloudflare_backoff_ms?: number | null
+          config_reload_interval_ms?: number | null
+          config_version?: number | null
+          cpp_target?: number | null
           created_at?: string | null
+          enable_escalation_hedge?: boolean | null
+          enable_fill_audit?: boolean | null
+          enable_volatility_margin?: boolean | null
+          escalation_reprice_ticks?: number | null
+          escalation_timeout_ms?: number | null
+          fill_audit_interval_ms?: number | null
+          global_max_notional?: number | null
+          hedge_must_by_sec?: number | null
+          hedge_timeout_sec?: number | null
           id?: string
+          last_reload_requested_at?: string | null
+          max_notional_per_market?: number | null
           max_notional_per_trade?: number | null
           max_position_size?: number | null
+          max_shares_per_side?: number | null
+          max_total_shares_per_market?: number | null
           min_edge_threshold?: number | null
+          min_lot_shares?: number | null
           min_order_interval_ms?: number | null
           opening_max_price?: number | null
+          pair_limit?: number | null
           polymarket_address?: string | null
+          price_guard_max?: number | null
+          price_guard_min?: number | null
+          stop_new_trades_sec?: number | null
           strategy_enabled?: boolean | null
           trade_assets?: string[] | null
           updated_at?: string | null
+          volatility_atr_period?: number | null
+          volatility_margin_multiplier?: number | null
           vpn_endpoint?: string | null
           vpn_required?: boolean | null
         }
