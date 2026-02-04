@@ -87,7 +87,16 @@ export interface PositionDrift {
 // Maps: conditionId -> runnerSlug
 const conditionIdToSlug = new Map<string, string>();
 // Maps: tokenId -> { slug, side }
-const tokenIdToSlug = new Map<string, { slug: string; side: 'UP' | 'DOWN' }>();
+// NOTE: include conditionId to prevent tokenId reuse / overwrites from mis-attributing positions
+// across market windows.
+const tokenIdToSlug = new Map<
+  string,
+  { slug: string; side: 'UP' | 'DOWN'; conditionId: string }
+>();
+
+// Track which runner slugs are currently active/registered.
+// This lets us safely use API slug fallback ONLY when it refers to an active market.
+const registeredSlugs = new Set<string>();
 
 /**
  * Register a market from the runner so we can match positions correctly.
@@ -99,14 +108,17 @@ export function registerMarketForCache(
   upTokenId: string,
   downTokenId: string
 ): void {
+  if (runnerSlug) {
+    registeredSlugs.add(runnerSlug);
+  }
   if (conditionId) {
     conditionIdToSlug.set(conditionId, runnerSlug);
   }
   if (upTokenId) {
-    tokenIdToSlug.set(upTokenId, { slug: runnerSlug, side: 'UP' });
+    tokenIdToSlug.set(upTokenId, { slug: runnerSlug, side: 'UP', conditionId });
   }
   if (downTokenId) {
-    tokenIdToSlug.set(downTokenId, { slug: runnerSlug, side: 'DOWN' });
+    tokenIdToSlug.set(downTokenId, { slug: runnerSlug, side: 'DOWN', conditionId });
   }
 }
 
@@ -118,7 +130,11 @@ export function unregisterMarketFromCache(
   upTokenId: string,
   downTokenId: string
 ): void {
-  if (conditionId) conditionIdToSlug.delete(conditionId);
+  if (conditionId) {
+    const slug = conditionIdToSlug.get(conditionId);
+    if (slug) registeredSlugs.delete(slug);
+    conditionIdToSlug.delete(conditionId);
+  }
   if (upTokenId) tokenIdToSlug.delete(upTokenId);
   if (downTokenId) tokenIdToSlug.delete(downTokenId);
 }
@@ -257,7 +273,14 @@ function resolveRunnerSlug(pos: RawPosition): string | null {
   // 1. Try tokenId mapping (most accurate)
   const tokenMatch = tokenIdToSlug.get(pos.tokenId);
   if (tokenMatch) {
+    // Guard against tokenId reuse across windows (or mapping overwrites):
+    // if the API position's conditionId doesn't match the token mapping's conditionId,
+    // do NOT attribute it to this slug.
+    if (pos.conditionId && tokenMatch.conditionId && pos.conditionId !== tokenMatch.conditionId) {
+      // fall through to conditionId mapping
+    } else {
     return tokenMatch.slug;
+    }
   }
 
   // 2. Try conditionId mapping
@@ -268,7 +291,11 @@ function resolveRunnerSlug(pos: RawPosition): string | null {
 
   // 3. If API provides a slug that looks like our format, use it
   // But only for 15m/updown markets we care about
-  if (pos.apiSlug && (pos.apiSlug.includes('15m') || pos.apiSlug.includes('updown'))) {
+  if (
+    pos.apiSlug &&
+    (pos.apiSlug.includes('15m') || pos.apiSlug.includes('updown')) &&
+    registeredSlugs.has(pos.apiSlug)
+  ) {
     return pos.apiSlug;
   }
 
