@@ -154,9 +154,12 @@ export function useChainlinkRealtime(enabled: boolean = true): UseChainlinkRealt
         }
       };
 
-      ws.onerror = (error) => {
-        console.error('[Crypto WS] Error:', error);
+      ws.onerror = (_error) => {
+        // Browsers often surface a useless Event (e.g. { isTrusted: true }).
+        // Treat this as a transient connectivity issue and fall back quietly.
+        console.warn('[Crypto WS] WebSocket error - using REST fallback');
         setConnectionState('error');
+        startRestPolling();
       };
 
       ws.onclose = (event) => {
