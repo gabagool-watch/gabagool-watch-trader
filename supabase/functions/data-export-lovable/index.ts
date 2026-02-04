@@ -5,6 +5,17 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
+function gzipStream(data: string): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(data))
+      controller.close()
+    }
+  })
+  return stream.pipeThrough(new CompressionStream('gzip'))
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
@@ -67,26 +78,31 @@ Deno.serve(async (req) => {
 
       console.log(`[data-export] price-ticks: ${allTicks.length} total rows`)
 
+      let content: string
+      let filename: string
+      let contentType: string
+
       if (format === 'csv') {
         const headers = ['timestamp_ms', 'market_slug', 'spot_price', 'up_best_bid', 'up_best_ask', 'down_best_bid', 'down_best_ask']
         const csvRows = [
           headers.join(','),
           ...allTicks.map(row => headers.map(h => row[h as keyof typeof row] ?? '').join(','))
         ]
-        return new Response(csvRows.join('\n'), {
-          headers: {
-            ...corsHeaders,
-            'Content-Type': 'text/csv',
-            'Content-Disposition': 'attachment; filename="price-ticks-7d.csv"',
-          },
-        })
+        content = csvRows.join('\n')
+        filename = 'price-ticks-7d.csv.gz'
+        contentType = 'text/csv'
+      } else {
+        content = JSON.stringify(allTicks)
+        filename = 'price-ticks-7d.json.gz'
+        contentType = 'application/json'
       }
 
-      return new Response(JSON.stringify(allTicks, null, 2), {
+      return new Response(gzipStream(content), {
         headers: {
           ...corsHeaders,
-          'Content-Type': 'application/json',
-          'Content-Disposition': 'attachment; filename="price-ticks-7d.json"',
+          'Content-Type': 'application/gzip',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          'X-Original-Content-Type': contentType,
         },
       })
 
@@ -146,26 +162,31 @@ Deno.serve(async (req) => {
 
       console.log(`[data-export] market-windows: ${exportData.length} rows with calculated prices`)
 
+      let content: string
+      let filename: string
+      let contentType: string
+
       if (format === 'csv') {
         const headers = ['market_slug', 'start_time', 'expiry_time', 'strike_price', 'settlement_price', 'winning_side']
         const csvRows = [
           headers.join(','),
           ...exportData.map(row => headers.map(h => row[h as keyof typeof row] ?? '').join(','))
         ]
-        return new Response(csvRows.join('\n'), {
-          headers: {
-            ...corsHeaders,
-            'Content-Type': 'text/csv',
-            'Content-Disposition': 'attachment; filename="market-windows-7d.csv"',
-          },
-        })
+        content = csvRows.join('\n')
+        filename = 'market-windows-7d.csv.gz'
+        contentType = 'text/csv'
+      } else {
+        content = JSON.stringify(exportData)
+        filename = 'market-windows-7d.json.gz'
+        contentType = 'application/json'
       }
 
-      return new Response(JSON.stringify(exportData, null, 2), {
+      return new Response(gzipStream(content), {
         headers: {
           ...corsHeaders,
-          'Content-Type': 'application/json',
-          'Content-Disposition': 'attachment; filename="market-windows-7d.json"',
+          'Content-Type': 'application/gzip',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          'X-Original-Content-Type': contentType,
         },
       })
 
@@ -246,26 +267,31 @@ Deno.serve(async (req) => {
 
       console.log(`[data-export] first-minute-stats: ${exportData.length} rows generated`)
 
+      let content: string
+      let filename: string
+      let contentType: string
+
       if (format === 'csv') {
         const headers = ['market_slug', 'start_time', 'winning_side', 'first_min_open_price', 'first_min_close_price', 'first_min_high', 'first_min_low', 'first_min_tick_count', 'up_ask_at_1min', 'down_ask_at_1min']
         const csvRows = [
           headers.join(','),
           ...exportData.map(row => headers.map(h => row[h as keyof typeof row] ?? '').join(','))
         ]
-        return new Response(csvRows.join('\n'), {
-          headers: {
-            ...corsHeaders,
-            'Content-Type': 'text/csv',
-            'Content-Disposition': 'attachment; filename="first-minute-stats-7d.csv"',
-          },
-        })
+        content = csvRows.join('\n')
+        filename = 'first-minute-stats-7d.csv.gz'
+        contentType = 'text/csv'
+      } else {
+        content = JSON.stringify(exportData)
+        filename = 'first-minute-stats-7d.json.gz'
+        contentType = 'application/json'
       }
 
-      return new Response(JSON.stringify(exportData, null, 2), {
+      return new Response(gzipStream(content), {
         headers: {
           ...corsHeaders,
-          'Content-Type': 'application/json',
-          'Content-Disposition': 'attachment; filename="first-minute-stats-7d.json"',
+          'Content-Type': 'application/gzip',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          'X-Original-Content-Type': contentType,
         },
       })
     }
