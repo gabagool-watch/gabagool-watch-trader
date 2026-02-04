@@ -100,8 +100,7 @@ Deno.serve(async (req) => {
 
       if (snapshotError) throw snapshotError
 
-      const marketSlugs = [...new Set((snapshots || []).map(s => s.market_slug))]
-      console.log(`[data-export] market-windows: ${marketSlugs.length} unique markets`)
+      console.log(`[data-export] market-windows: ${(snapshots || []).length} snapshots found`)
 
       // For each market, get the first and last tick to determine strike and settlement
       const exportData: Array<{
@@ -169,9 +168,109 @@ Deno.serve(async (req) => {
           'Content-Disposition': 'attachment; filename="market-windows-7d.json"',
         },
       })
+
+    } else if (exportType === 'first-minute-stats') {
+      // Export: First Minute Stats per Market (aggregated)
+      const { data: snapshots, error: snapshotError } = await supabase
+        .from('v35_expiry_snapshots')
+        .select('market_slug, expiry_time, predicted_winning_side')
+        .gte('created_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
+        .order('expiry_time', { ascending: true })
+
+      if (snapshotError) throw snapshotError
+
+      console.log(`[data-export] first-minute-stats: ${(snapshots || []).length} markets to analyze`)
+
+      const exportData: Array<{
+        market_slug: string
+        start_time: string
+        winning_side: string | null
+        first_min_open_price: number | null
+        first_min_close_price: number | null
+        first_min_high: number | null
+        first_min_low: number | null
+        first_min_tick_count: number
+        up_ask_at_1min: number | null
+        down_ask_at_1min: number | null
+      }> = []
+
+      for (const snapshot of (snapshots || [])) {
+        const expiryTime = new Date(snapshot.expiry_time)
+        const startTime = new Date(expiryTime.getTime() - 15 * 60 * 1000)
+        const oneMinLater = new Date(startTime.getTime() + 60 * 1000)
+        
+        const startMs = startTime.getTime()
+        const oneMinMs = oneMinLater.getTime()
+
+        // Get all ticks in the first minute
+        const { data: firstMinTicks } = await supabase
+          .from('v35_price_ticks')
+          .select('spot_price, up_best_ask, down_best_ask, ts')
+          .eq('market_slug', snapshot.market_slug)
+          .gte('ts', startMs)
+          .lte('ts', oneMinMs)
+          .order('ts', { ascending: true })
+
+        if (!firstMinTicks || firstMinTicks.length === 0) {
+          exportData.push({
+            market_slug: snapshot.market_slug,
+            start_time: startTime.toISOString(),
+            winning_side: snapshot.predicted_winning_side,
+            first_min_open_price: null,
+            first_min_close_price: null,
+            first_min_high: null,
+            first_min_low: null,
+            first_min_tick_count: 0,
+            up_ask_at_1min: null,
+            down_ask_at_1min: null,
+          })
+          continue
+        }
+
+        const prices = firstMinTicks.map(t => t.spot_price).filter(p => p != null) as number[]
+        const lastTick = firstMinTicks[firstMinTicks.length - 1]
+
+        exportData.push({
+          market_slug: snapshot.market_slug,
+          start_time: startTime.toISOString(),
+          winning_side: snapshot.predicted_winning_side,
+          first_min_open_price: firstMinTicks[0].spot_price,
+          first_min_close_price: lastTick.spot_price,
+          first_min_high: prices.length > 0 ? Math.max(...prices) : null,
+          first_min_low: prices.length > 0 ? Math.min(...prices) : null,
+          first_min_tick_count: firstMinTicks.length,
+          up_ask_at_1min: lastTick.up_best_ask,
+          down_ask_at_1min: lastTick.down_best_ask,
+        })
+      }
+
+      console.log(`[data-export] first-minute-stats: ${exportData.length} rows generated`)
+
+      if (format === 'csv') {
+        const headers = ['market_slug', 'start_time', 'winning_side', 'first_min_open_price', 'first_min_close_price', 'first_min_high', 'first_min_low', 'first_min_tick_count', 'up_ask_at_1min', 'down_ask_at_1min']
+        const csvRows = [
+          headers.join(','),
+          ...exportData.map(row => headers.map(h => row[h as keyof typeof row] ?? '').join(','))
+        ]
+        return new Response(csvRows.join('\n'), {
+          headers: {
+            ...corsHeaders,
+            'Content-Type': 'text/csv',
+            'Content-Disposition': 'attachment; filename="first-minute-stats-7d.csv"',
+          },
+        })
+      }
+
+      return new Response(JSON.stringify(exportData, null, 2), {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/json',
+          'Content-Disposition': 'attachment; filename="first-minute-stats-7d.json"',
+        },
+      })
     }
 
-    return new Response(JSON.stringify({ error: 'Invalid export type. Use: price-ticks or market-windows' }), {
+    return new Response(JSON.stringify({ error: 'Invalid export type. Use: price-ticks, market-windows, or first-minute-stats' }), {
       status: 400,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
