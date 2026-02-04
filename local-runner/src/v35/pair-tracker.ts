@@ -1,13 +1,13 @@
 // ============================================================
 // V37 PAIR TRACKER - PER-PAIR MAKER APPROACH
 // ============================================================
-// Version: V37.6.0 - "Smart Maker Placement"
+// Version: V37.6.1 - "Startup Delay + Smart Maker"
 //
 // STRATEGY:
-// 1. Every 5 seconds: check if expensive side is 3-97c
-// 2. Buy expensive side as TAKER (FOK)
-// 3. Check if "free" shares exist on cheap side (unpaired excess)
-// 4. If free shares >= taker size: NO MAKER NEEDED (instant pair!)
+// 1. WAIT 60 seconds from market start before trading (14 min window)
+// 2. Every 5 seconds: check if expensive side is 3-97c
+// 3. Buy expensive side as TAKER (FOK)
+// 4. Check if "free" shares exist on cheap side (unpaired excess)
 // 5. If free shares < taker size: Place MAKER for the DIFFERENCE only
 // 6. Max 10 concurrent open pairs
 //
@@ -128,6 +128,9 @@ const DEFAULT_CONFIG: PairTrackerConfig = {
   // Fill audit
   fillAuditIntervalMs: 5_000,        // Check every 5s
 };
+
+// Startup delay: wait 60 seconds from market start before trading
+const STARTUP_DELAY_MS = 60_000;
 
 // Minimum order value per Polymarket CLOB rules
 const MIN_ORDER_VALUE_USD = 1.00;
@@ -345,6 +348,19 @@ export class PairTracker {
     // Only BTC for now
     if (market.asset !== 'BTC') {
       return { success: false, error: 'only_btc' };
+    }
+    
+    // =========================================================================
+    // V37.6.1: STARTUP DELAY - Wait 60s from market start before trading
+    // =========================================================================
+    const marketStartTime = market.eventStartTime?.getTime?.() || market.eventStartTime;
+    const now = Date.now();
+    const elapsedSinceStart = now - marketStartTime;
+    
+    if (elapsedSinceStart < STARTUP_DELAY_MS) {
+      const waitSeconds = Math.ceil((STARTUP_DELAY_MS - elapsedSinceStart) / 1000);
+      console.log(`[PairTracker] ⏳ STARTUP DELAY: ${waitSeconds}s remaining (trading starts at T+60s)`);
+      return { success: false, error: 'startup_delay' };
     }
     
     // Determine sides early
