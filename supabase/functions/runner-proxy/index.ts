@@ -11,6 +11,51 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 
 const LEASE_ID = '00000000-0000-0000-0000-000000000001';
 
+// ============================================================
+// Small helpers (keep runner-proxy resilient to transient network resets)
+// ============================================================
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function isTransientNetworkError(err: any): boolean {
+  const msg = String(err?.message || err?.details || err || '').toLowerCase();
+  return (
+    msg.includes('connection reset') ||
+    msg.includes('sendrequest') ||
+    msg.includes('connection error') ||
+    msg.includes('fetch') ||
+    msg.includes('timeout')
+  );
+}
+
+async function insertWithRetry(
+  supabase: any,
+  table: string,
+  rows: any[],
+  opts: { retries?: number; baseDelayMs?: number } = {}
+): Promise<{ ok: true } | { ok: false; error: any; transient: boolean }> {
+  const retries = opts.retries ?? 3;
+  const baseDelayMs = opts.baseDelayMs ?? 250;
+
+  let lastError: any = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const { error } = await supabase.from(table).insert(rows);
+    if (!error) return { ok: true };
+
+    lastError = error;
+    const transient = isTransientNetworkError(error);
+    if (!transient) return { ok: false, error, transient: false };
+
+    if (attempt < retries) {
+      await sleep(baseDelayMs * Math.pow(2, attempt));
+    }
+  }
+
+  return { ok: false, error: lastError, transient: true };
+}
+
 type Action =
   | 'get-markets'
   | 'get-trades'
@@ -1997,20 +2042,58 @@ Deno.serve(async (req) => {
           outcome: log.outcome ?? null,
         }));
 
-        const { error } = await supabase
-          .from('realtime_price_logs')
-          .insert(dbLogs);
+        // Chunk inserts to reduce payload size + lower chance of connection resets.
+        const CHUNK_SIZE = 50;
+        let inserted = 0;
+        let dropped = 0;
+        let lastTransientError: any = null;
 
-        if (error) {
-          console.error('[runner-proxy] save-realtime-price-logs error:', error);
-          return new Response(JSON.stringify({ success: false, error: error.message }), {
-            status: 500,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        for (let i = 0; i < dbLogs.length; i += CHUNK_SIZE) {
+          const chunk = dbLogs.slice(i, i + CHUNK_SIZE);
+          const res = await insertWithRetry(supabase, 'realtime_price_logs', chunk, {
+            retries: 3,
+            baseDelayMs: 250,
           });
+
+          if (res.ok) {
+            inserted += chunk.length;
+            continue;
+          }
+
+          // Non-transient DB/schema error: fail hard (this is a real bug)
+          if (!res.transient) {
+            console.error('[runner-proxy] save-realtime-price-logs error:', res.error);
+            return new Response(JSON.stringify({ success: false, error: res.error?.message || String(res.error) }), {
+              status: 500,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            });
+          }
+
+          // Transient network error: best-effort drop this chunk to avoid spamming 500s.
+          lastTransientError = res.error;
+          dropped += chunk.length;
         }
 
-        console.log(`[runner-proxy] 📊 Saved ${logs.length} realtime price logs`);
-        return new Response(JSON.stringify({ success: true, count: logs.length }), {
+        if (dropped > 0) {
+          console.warn(
+            `[runner-proxy] ⚠️ Realtime price logs: inserted=${inserted} dropped=${dropped} (transient network error)`
+          );
+          return new Response(
+            JSON.stringify({
+              success: true,
+              count: inserted,
+              dropped,
+              transient_error: true,
+              error: String(lastTransientError?.message || lastTransientError || 'transient network error'),
+            }),
+            {
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            }
+          );
+        }
+
+        console.log(`[runner-proxy] 📊 Saved ${inserted} realtime price logs`);
+        return new Response(JSON.stringify({ success: true, count: inserted }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
@@ -2204,13 +2287,12 @@ Deno.serve(async (req) => {
           ? rawTs 
           : (typeof rawTs === 'number' ? new Date(rawTs).toISOString() : new Date().toISOString());
 
-        // V36.10.1: Use raw SQL with ON CONFLICT DO NOTHING to handle BOTH unique constraints
-        // - fill_key (primary dedup key)
-        // - v35_fills_unique_order (order_id, wallet_address, market_slug)
-        // The Supabase JS client upsert can only target one constraint, so we use rpc or raw insert
+        // Make fill inserts idempotent WITHOUT triggering DB-level duplicate-key errors.
+        // This targets the existing unique constraint: UNIQUE(order_id, wallet_address, market_slug)
+        // so repeated saves become ON CONFLICT DO NOTHING.
         const { error } = await supabase
           .from('v35_fills')
-          .insert(
+          .upsert(
             {
               order_id: orderId || null,
               token_id: tokenId || null,
@@ -2223,19 +2305,14 @@ Deno.serve(async (req) => {
               fill_ts: fillTs,
               fill_key: fillKey,
               wallet_address: walletAddress,
+            },
+            {
+              onConflict: 'order_id,wallet_address,market_slug',
+              ignoreDuplicates: true,
             }
           );
 
-        // V36.10.1: Silently ignore duplicate key violations - this is expected behavior
-        // when the same fill arrives via WebSocket AND direct logging
         if (error) {
-          const isDuplicateError = error.code === '23505' || error.message?.includes('duplicate key');
-          if (isDuplicateError) {
-            console.log(`[runner-proxy] ⏭️ Duplicate fill ignored (already exists): ${side} ${sizeStr}@${priceStr}`);
-            return new Response(JSON.stringify({ success: true, duplicate: true }), {
-              headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-            });
-          }
           console.error('[runner-proxy] save-v35-fill error:', error);
           return new Response(JSON.stringify({ success: false, error: error.message }), {
             status: 500,
