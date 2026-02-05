@@ -85,6 +85,7 @@ import {
   setMergeCallback, 
   getMergeResult,
   isMergeSchedulerReady,
+  updateMergeEntryPositions,
 } from './merge-scheduler.js';
 
 // ============================================================
@@ -613,6 +614,19 @@ async function cleanupExpiredMarkets(): Promise<boolean> {
         winningSide: null, // Unknown at expiry time
         pnl: metrics.lockedProfit, // Best estimate
       }).catch(() => {});
+      
+      // V37.7.1: Update merge entry with FINAL position data BEFORE unregistering cache
+      // This is CRITICAL - the merge fires 30s after expiry, so we need to capture
+      // the position data NOW while it's still valid
+      if (isMergeSchedulerReady()) {
+        updateMergeEntryPositions(
+          market.slug,
+          market.upQty,
+          market.downQty,
+          market.upCost,
+          market.downCost
+        );
+      }
       
       // Remove from token map
       tokenToMarket.delete(market.upTokenId);
