@@ -25,8 +25,8 @@
 // - enableVolatilityMargin: ATR-based margin adjustment
 // ============================================================
 
-export const V35_VERSION = 'V37.2.2';
-export const V35_CODENAME = 'Wider Margin (6c)';
+export const V35_VERSION = 'V37.2.3';
+export const V35_CODENAME = 'Duplicate Fill Fix';
 
 export type V35Mode = 'test' | 'moderate' | 'production';
 
