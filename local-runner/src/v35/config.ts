@@ -25,8 +25,8 @@
 // - enableVolatilityMargin: ATR-based margin adjustment
 // ============================================================
 
-export const V35_VERSION = 'V37.2.3';
-export const V35_CODENAME = 'Duplicate Fill Fix';
+export const V35_VERSION = 'V37.8.0';
+export const V35_CODENAME = 'On-Chain Merge';
 
 export type V35Mode = 'test' | 'moderate' | 'production';
 
