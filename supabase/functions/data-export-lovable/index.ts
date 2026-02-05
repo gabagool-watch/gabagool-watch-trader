@@ -451,9 +451,153 @@ Deno.serve(async (req) => {
           'X-Original-Content-Type': format === 'csv' ? 'text/csv' : 'application/json',
         },
       })
+    } else if (exportType === 'market-analysis-full') {
+      // Export: Full Market Analysis with Share Price Trajectory
+      // Includes: start_time, strike_price, winning_side, 1min prices, AND full share price timeline
+      const daysParam = url.searchParams.get('days') || '30'
+      const days = parseInt(daysParam, 10)
+      const asset = url.searchParams.get('asset') || 'BTC'
+      const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+      const tickInterval = parseInt(url.searchParams.get('tick_interval') || '5', 10) // Sample every N seconds
+
+      console.log(`[data-export] market-analysis-full: fetching ${asset} markets from last ${days} days, tick_interval=${tickInterval}s`)
+
+      // Get markets from market_history
+      const { data: markets, error: marketsError } = await supabase
+        .from('market_history')
+        .select('slug, event_start_time, event_expiry_time, strike_price, open_price, result')
+        .eq('asset', asset)
+        .gte('event_start_time', cutoff)
+        .not('event_start_time', 'is', null)
+        .order('event_start_time', { ascending: false })
+
+      if (marketsError) throw marketsError
+
+      console.log(`[data-export] market-analysis-full: ${markets?.length || 0} markets found`)
+
+      // Get all v35_price_ticks for these markets
+      const { data: allTicks, error: ticksError } = await supabase
+        .from('v35_price_ticks')
+        .select('market_slug, ts, spot_price, up_best_bid, up_best_ask, down_best_bid, down_best_ask, strike_price')
+        .eq('asset', asset)
+        .gte('created_at', cutoff)
+        .order('ts', { ascending: true })
+
+      if (ticksError) throw ticksError
+
+      console.log(`[data-export] market-analysis-full: ${allTicks?.length || 0} ticks found`)
+
+      // Group ticks by market
+      const ticksByMarket = new Map<string, typeof allTicks>()
+      for (const tick of (allTicks || [])) {
+        const existing = ticksByMarket.get(tick.market_slug) || []
+        existing.push(tick)
+        ticksByMarket.set(tick.market_slug, existing)
+      }
+
+      // Build results with trajectory
+      const results: Array<{
+        market_slug: string
+        start_time: string
+        expiry_time: string | null
+        strike_price: number | null
+        winning_side: string | null
+        up_ask_at_1min: number | null
+        down_ask_at_1min: number | null
+        tick_count: number
+        price_trajectory: Array<{
+          seconds_from_start: number
+          spot_price: number
+          up_bid: number
+          up_ask: number
+          down_bid: number
+          down_ask: number
+        }>
+      }> = []
+
+      for (const market of (markets || [])) {
+        const startTime = new Date(market.event_start_time)
+        const startMs = startTime.getTime()
+        const marketTicks = ticksByMarket.get(market.slug) || []
+
+        // Find tick at 1 min
+        const targetMs = startMs + 60 * 1000
+        let oneMinTick = null
+        let minDiff = Infinity
+        for (const tick of marketTicks) {
+          const diff = Math.abs(tick.ts - targetMs)
+          if (diff < minDiff && diff < 30000) { // within 30s of target
+            minDiff = diff
+            oneMinTick = tick
+          }
+        }
+
+        // Sample trajectory at tickInterval
+        const trajectory: Array<{
+          seconds_from_start: number
+          spot_price: number
+          up_bid: number
+          up_ask: number
+          down_bid: number
+          down_ask: number
+        }> = []
+
+        let lastSampleSec = -tickInterval
+        for (const tick of marketTicks) {
+          const secFromStart = Math.floor((tick.ts - startMs) / 1000)
+          if (secFromStart >= lastSampleSec + tickInterval) {
+            trajectory.push({
+              seconds_from_start: secFromStart,
+              spot_price: tick.spot_price,
+              up_bid: tick.up_best_bid,
+              up_ask: tick.up_best_ask,
+              down_bid: tick.down_best_bid,
+              down_ask: tick.down_best_ask,
+            })
+            lastSampleSec = secFromStart
+          }
+        }
+
+        results.push({
+          market_slug: market.slug,
+          start_time: market.event_start_time,
+          expiry_time: market.event_expiry_time || null,
+          strike_price: market.strike_price || market.open_price || (marketTicks[0]?.strike_price) || null,
+          winning_side: market.result || null,
+          up_ask_at_1min: oneMinTick?.up_best_ask || null,
+          down_ask_at_1min: oneMinTick?.down_best_ask || null,
+          tick_count: marketTicks.length,
+          price_trajectory: trajectory,
+        })
+      }
+
+      const summary = {
+        export_time: new Date().toISOString(),
+        days_exported: days,
+        asset,
+        tick_interval_seconds: tickInterval,
+        total_markets: results.length,
+        markets_with_trajectory: results.filter(r => r.tick_count > 0).length,
+        markets_with_1min_data: results.filter(r => r.up_ask_at_1min !== null).length,
+        total_trajectory_points: results.reduce((sum, r) => sum + r.price_trajectory.length, 0),
+      }
+
+      console.log(`[data-export] market-analysis-full: summary`, summary)
+
+      const content = JSON.stringify({ summary, markets: results })
+      const filename = `market-analysis-full-${asset}-${days}d.json.gz`
+
+      return new Response(gzipStream(content), {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/gzip',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          'X-Original-Content-Type': 'application/json',
+        },
+      })
     }
 
-    return new Response(JSON.stringify({ error: 'Invalid export type. Use: price-ticks, market-windows, first-minute-stats, all, or market-analysis' }), {
+    return new Response(JSON.stringify({ error: 'Invalid export type. Use: price-ticks, market-windows, first-minute-stats, market-analysis, or market-analysis-full' }), {
       status: 400,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
