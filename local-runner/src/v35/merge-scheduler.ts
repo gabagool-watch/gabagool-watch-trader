@@ -12,6 +12,7 @@ import type { V35Market, V35Asset } from './types.js';
 import { getMergeManager, MergeManager, type MergeCandidate, type MergeResult } from './merge-manager.js';
 import { getCachedPosition } from '../position-cache.js';
 import { saveBotEvent } from '../backend.js';
+import { saveV35ExpirySnapshot, type V35ExpirySnapshotData } from './backend.js';
 
 // ============================================================
 // TYPES
@@ -303,6 +304,29 @@ export function getScheduledMerges(): Map<string, MergeScheduleEntry> {
  */
 export function getScheduledMergeCount(): number {
   return scheduledMerges.size;
+}
+
+/**
+ * V37.7.1: Update position data for an existing scheduled merge entry.
+ * Called by runner when market expires to ensure merge has latest position data.
+ */
+export function updateMergeEntryPositions(
+  marketSlug: string,
+  upShares: number,
+  downShares: number,
+  upCost: number,
+  downCost: number,
+): void {
+  const entry = scheduledMerges.get(marketSlug);
+  if (entry) {
+    entry.upShares = upShares;
+    entry.downShares = downShares;
+    entry.upCost = upCost;
+    entry.downCost = downCost;
+    console.log(`[MergeScheduler] 📊 Updated positions for ${marketSlug.slice(-25)}: UP=${upShares.toFixed(1)}, DOWN=${downShares.toFixed(1)}, Cost=$${(upCost + downCost).toFixed(2)}`);
+  } else {
+    console.log(`[MergeScheduler] ⚠️ No scheduled merge found for ${marketSlug.slice(-25)} to update`);
+  }
 }
 
 /**
