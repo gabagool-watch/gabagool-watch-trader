@@ -675,6 +675,9 @@ export class PairTracker {
   /**
    * Handle a fill from WebSocket or REST API
    */
+  // Track processed fills to prevent duplicates (fillId = orderId + tradeId)
+  private processedFillIds: Set<string> = new Set();
+  
   onFill(fill: V35Fill): void {
     // Find pair where this fill matches the maker order
     const pair = Array.from(this.pairs.values()).find(p => 
@@ -682,6 +685,23 @@ export class PairTracker {
     );
     
     if (!pair) return;
+    
+    // =========================================================================
+    // V37.2.3: DUPLICATE FILL PREVENTION
+    // Same fill can arrive via WebSocket AND REST audit - only process once
+    // =========================================================================
+    const fillId = `${fill.orderId}_${fill.tradeId || fill.timestamp?.getTime() || fill.size}`;
+    if (this.processedFillIds.has(fillId)) {
+      console.log(`[PairTracker] ⚠️ DUPLICATE FILL SKIPPED: ${fillId}`);
+      return;
+    }
+    this.processedFillIds.add(fillId);
+    
+    // Clean up old fill IDs (keep last 1000)
+    if (this.processedFillIds.size > 1000) {
+      const arr = Array.from(this.processedFillIds);
+      this.processedFillIds = new Set(arr.slice(-500));
+    }
     
     // Maker filled!
     pair.makerFilledAt = Date.now();
@@ -704,15 +724,25 @@ export class PairTracker {
       fillType: 'MAKER',
     }).catch(err => console.error('[PairTracker] Failed to save maker fill:', err));
     
-    // Calculate P&L
-    const takerCost = (pair.takerFilledPrice || 0) * (pair.takerFilledSize || 0);
-    const makerCost = (pair.makerFilledPrice || 0) * pair.makerFilledSize;
-    const totalCost = takerCost + makerCost;
-    const pairedShares = Math.min(pair.takerFilledSize || 0, pair.makerFilledSize);
+    // =========================================================================
+    // V37.2.3: CORRECT CPP CALCULATION
+    // CPP = (takerPrice + makerPrice) for paired shares only
+    // Extra maker shares beyond taker size are "free shares" for future pairs
+    // =========================================================================
+    const takerSize = pair.takerFilledSize || 0;
+    const makerSize = pair.makerFilledSize;
+    const pairedShares = Math.min(takerSize, makerSize);
     
     if (pairedShares > 0) {
+      // Only count maker cost for the shares that are actually paired
+      const takerCost = (pair.takerFilledPrice || 0) * pairedShares;
+      const makerCost = (pair.makerFilledPrice || 0) * pairedShares;
+      const totalCost = takerCost + makerCost;
+      
       pair.actualCpp = totalCost / pairedShares;
-      pair.pnl = pairedShares - totalCost; // 1 share pair pays out $1
+      pair.pnl = pairedShares * (1 - pair.actualCpp);
+      
+      console.log(`[PairTracker] 📊 CPP: $${pair.actualCpp.toFixed(3)} = $${pair.takerFilledPrice?.toFixed(3)} + $${pair.makerFilledPrice?.toFixed(3)}`);
     }
     
     // Check if fully hedged

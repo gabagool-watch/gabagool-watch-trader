@@ -69,6 +69,7 @@ export interface V35Fill {
   marketSlug: string;
   asset: V35Asset | string;
   fillType?: V35FillType;  // V36.8.0: Track whether this was a maker or taker fill
+  tradeId?: string;        // V37.2.3: Unique trade ID for duplicate prevention
 }
 
 // ============================================================
