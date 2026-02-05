@@ -25,8 +25,8 @@
 // - enableVolatilityMargin: ATR-based margin adjustment
 // ============================================================
 
-export const V35_VERSION = 'V37.2.0';
-export const V35_CODENAME = 'Per-Pair Makers';
+export const V35_VERSION = 'V37.2.2';
+export const V35_CODENAME = 'Wider Margin (6c)';
 
 export type V35Mode = 'test' | 'moderate' | 'production';
 
@@ -159,12 +159,12 @@ export const TEST_CONFIG: V35Config = {
   gridStep: 0.02,
   sharesPerLevel: 5,
   
-  // HEDGE PARAMETERS - V37.2.1: TARGET 0.965 CPP (3.5% margin)
+   // HEDGE PARAMETERS - V37.2.2: TARGET 0.94 CPP (6% margin)
   enableActiveHedge: true,
   maxHedgeSlippage: 0.10,           // Accept up to 10¢ slippage for hedge
   hedgeTimeoutMs: 2000,             // 2 second timeout
-  minEdgeAfterHedge: -0.035,        // Max 3.5% loss for hedge
-  maxCombinedCost: 0.965,           // Target 3.5% profit ($0.965 combined)
+   minEdgeAfterHedge: -0.06,         // Max 6% loss for hedge
+   maxCombinedCost: 0.94,            // Target 6% profit ($0.94 combined)
   maxCombinedCostEmergency: 1.00,   // Emergency: break-even max
   maxExpensiveBias: 1.50,           // Expensive side can have 50% more shares
   minHedgeNotional: 1.05,           // Just above exchange min
@@ -231,13 +231,13 @@ export const MODERATE_CONFIG: V35Config = {
   gridStep: 0.02,
   sharesPerLevel: 5,
   
-  // HEDGE PARAMETERS - V35.10.0 CONTINUOUS HEDGE
+   // HEDGE PARAMETERS - V37.2.2: TARGET 0.94 CPP (6% margin)
   enableActiveHedge: true,
   maxHedgeSlippage: 0.08,
   hedgeTimeoutMs: 2000,
-  minEdgeAfterHedge: -0.15,
-  maxCombinedCost: 1.02,
-  maxCombinedCostEmergency: 1.15,
+   minEdgeAfterHedge: -0.06,
+   maxCombinedCost: 0.94,
+   maxCombinedCostEmergency: 1.00,
   maxExpensiveBias: 1.50,
   minHedgeNotional: 1.05,
   
@@ -303,13 +303,13 @@ export const PRODUCTION_CONFIG: V35Config = {
   gridStep: 0.02,
   sharesPerLevel: 10,
   
-  // HEDGE PARAMETERS - V35.10.0 CONTINUOUS HEDGE
+   // HEDGE PARAMETERS - V37.2.2: TARGET 0.94 CPP (6% margin)
   enableActiveHedge: true,
   maxHedgeSlippage: 0.08,
   hedgeTimeoutMs: 2000,
-  minEdgeAfterHedge: -0.15,
-  maxCombinedCost: 1.02,
-  maxCombinedCostEmergency: 1.15,
+   minEdgeAfterHedge: -0.06,
+   maxCombinedCost: 0.94,
+   maxCombinedCostEmergency: 1.00,
   maxExpensiveBias: 1.50,
   minHedgeNotional: 1.05,
   

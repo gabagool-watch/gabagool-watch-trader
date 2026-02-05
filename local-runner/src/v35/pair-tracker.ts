@@ -109,7 +109,7 @@ export interface PairTrackerConfig {
 
 const DEFAULT_CONFIG: PairTrackerConfig = {
   maxOpenPairs: 10,                  // Max 10 concurrent pairs
-  targetMargin: 0.05,                // 5c margin = 95c CPP
+   targetMargin: 0.06,                // 6c margin = 94c CPP
   minSharesPerTaker: 5,
   maxSharesPerTaker: 20,
   pairCooldownMs: 5_000,             // 5 seconds between pairs

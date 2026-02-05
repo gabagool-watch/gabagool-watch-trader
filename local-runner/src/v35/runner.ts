@@ -913,8 +913,8 @@ async function processMarket(market: V35Market): Promise<void> {
     
     log(`   📊 V37 Analysis:`);
     log(`      TAKER ${expensiveSide} @ ~$${takerPrice.toFixed(3)}`);
-    log(`      MAKER ${cheapSide} @ ~$${makerPrice.toFixed(3)} (100 - ${takerPrice.toFixed(2)} - 5c)`);
-    log(`      TARGET CPP: $0.95`);
+     log(`      MAKER ${cheapSide} @ ~$${makerPrice.toFixed(3)} (100 - ${takerPrice.toFixed(2)} - 6c)`);
+     log(`      TARGET CPP: $0.94 (6% marge)`);
     
     // Try to open a pair (respects 5s cooldown + max 10 pairs)
     if (pairTracker.canOpenNewPair()) {
