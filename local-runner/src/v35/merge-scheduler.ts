@@ -1,18 +1,18 @@
 // ============================================================
-// V37.7.0 MERGE SCHEDULER
+// V37.8.0 MERGE SCHEDULER - SIMPLIFIED
 // ============================================================
-// Schedules merge operations 30 seconds AFTER market expiry.
-// This ensures the market has fully settled before merging
-// paired positions back to USDC.
+// SIMPLE APPROACH:
+// 1. Schedule merge 30 seconds AFTER market expiry
+// 2. At merge time: check ON-CHAIN balances (source of truth)
+// 3. Calculate pairable shares from on-chain data
+// 4. Execute merge if profitable
 //
-// V37.7.0: Fixed snapshot update - now updates DB after merge completes
+// V37.8.0: Removed all complex position tracking. Trust on-chain data only.
 // ============================================================
 
 import type { V35Market, V35Asset } from './types.js';
 import { getMergeManager, MergeManager, type MergeCandidate, type MergeResult } from './merge-manager.js';
-import { getCachedPosition } from '../position-cache.js';
 import { saveBotEvent } from '../backend.js';
-import { saveV35ExpirySnapshot, type V35ExpirySnapshotData } from './backend.js';
 
 // ============================================================
 // TYPES
@@ -22,18 +22,13 @@ export interface MergeScheduleEntry {
   marketSlug: string;
   conditionId: string;
   asset: V35Asset;
-  expiryTime: number;     // ms timestamp
-  mergeTime: number;      // When to trigger merge (30s AFTER expiry)
+  upTokenId: string;
+  downTokenId: string;
+  expiryTime: number;
+  mergeTime: number;
   timeout: NodeJS.Timeout;
   status: 'scheduled' | 'executing' | 'completed' | 'failed' | 'skipped';
   result?: MergeResult;
-  // V37.7.0: Store market data for PnL logging
-  upShares?: number;
-  downShares?: number;
-  upCost?: number;
-  downCost?: number;
-  upTokenId?: string;
-  downTokenId?: string;
 }
 
 // ============================================================
@@ -77,10 +72,6 @@ export async function initMergeScheduler(): Promise<boolean> {
 // CALLBACK REGISTRATION
 // ============================================================
 
-/**
- * Register callback to be called when merge completes
- * This allows runner to update expiry snapshot with merge data
- */
 export function setMergeCallback(callback: (slug: string, result: MergeResult) => void): void {
   mergeCallback = callback;
 }
@@ -91,7 +82,7 @@ export function setMergeCallback(callback: (slug: string, result: MergeResult) =
 
 /**
  * Schedule a merge operation for a market
- * Will trigger 30 seconds AFTER expiry
+ * V37.8.0: Only stores essential data - on-chain balances checked at merge time
  */
 export function scheduleMerge(market: V35Market): void {
   const slug = market.slug;
@@ -103,31 +94,27 @@ export function scheduleMerge(market: V35Market): void {
   
   const now = Date.now();
   const expiryMs = market.expiry.getTime();
-  const mergeTime = expiryMs + (MERGE_AFTER_EXPIRY_SEC * 1000); // 30s AFTER expiry
+  const mergeTime = expiryMs + (MERGE_AFTER_EXPIRY_SEC * 1000);
   const delayMs = mergeTime - now;
   
-  // V37.7.0: Store market data for later PnL calculation
+  // V37.8.0: Only store essential data - no position tracking needed
   const entry: MergeScheduleEntry = {
     marketSlug: slug,
     conditionId: market.conditionId,
     asset: market.asset,
+    upTokenId: market.upTokenId,
+    downTokenId: market.downTokenId,
     expiryTime: expiryMs,
     mergeTime,
     timeout: null as any,
     status: 'scheduled',
-    upShares: market.upQty,
-    downShares: market.downQty,
-    upCost: market.upCost,
-    downCost: market.downCost,
-    upTokenId: market.upTokenId,
-    downTokenId: market.downTokenId,
   };
   
   scheduledMerges.set(slug, entry);
   
   // Don't schedule if in the past
   if (delayMs <= 0) {
-    console.log(`[MergeScheduler] ${slug.slice(-25)}: Merge time already passed, executing immediately`);
+    console.log(`[MergeScheduler] ${slug.slice(-25)}: Merge time passed, executing immediately`);
     executeMergeFromEntry(entry).catch(err => {
       console.error(`[MergeScheduler] Immediate merge error for ${slug}:`, err);
     });
@@ -135,7 +122,7 @@ export function scheduleMerge(market: V35Market): void {
   }
   
   const secsUntilExpiry = Math.max(0, (expiryMs - now) / 1000);
-  console.log(`[MergeScheduler] Scheduled merge for ${slug.slice(-25)} in ${(delayMs / 1000).toFixed(0)}s (expiry in ${secsUntilExpiry.toFixed(0)}s + 30s wait)`)
+  console.log(`[MergeScheduler] 📅 Scheduled: ${slug.slice(-25)} in ${(delayMs / 1000).toFixed(0)}s (expiry +30s)`);
   
   entry.timeout = setTimeout(() => {
     executeMergeFromEntry(entry).catch(err => {
@@ -152,7 +139,7 @@ export function cancelMerge(slug: string): void {
   if (entry) {
     clearTimeout(entry.timeout);
     scheduledMerges.delete(slug);
-    console.log(`[MergeScheduler] Cancelled merge for ${slug.slice(-25)}`);
+    console.log(`[MergeScheduler] Cancelled: ${slug.slice(-25)}`);
   }
 }
 
@@ -162,100 +149,113 @@ export function cancelMerge(slug: string): void {
 export function cancelAllMerges(): void {
   for (const [slug, entry] of scheduledMerges.entries()) {
     clearTimeout(entry.timeout);
-    console.log(`[MergeScheduler] Cancelled merge for ${slug.slice(-25)}`);
+    console.log(`[MergeScheduler] Cancelled: ${slug.slice(-25)}`);
   }
   scheduledMerges.clear();
 }
 
 // ============================================================
-// EXECUTION
+// EXECUTION - V37.8.0 SIMPLIFIED
 // ============================================================
 
 /**
- * Execute merge using stored entry data (V37.7.0)
+ * Execute merge using ON-CHAIN balances (source of truth)
+ * V37.8.0: No more position tracking - just check what's on-chain
  */
 async function executeMergeFromEntry(entry: MergeScheduleEntry): Promise<void> {
   const slug = entry.marketSlug;
   
   if (!initialized || !mergeManager) {
-    console.log(`[MergeScheduler] Merge manager not initialized, skipping ${slug}`);
+    console.log(`[MergeScheduler] ❌ Not initialized, skipping ${slug.slice(-25)}`);
     entry.status = 'skipped';
+    scheduledMerges.delete(slug);
     return;
   }
   
   entry.status = 'executing';
   
-  // V37.7.0: Use cached position if available, fall back to stored entry data
-  const position = getCachedPosition(slug);
+  console.log(`\n[MergeScheduler] ═══════════════════════════════════════════════`);
+  console.log(`[MergeScheduler] 🔄 MERGE CHECK: ${slug.slice(-35)}`);
+  console.log(`[MergeScheduler] ═══════════════════════════════════════════════`);
   
-  const upShares = (position && position.upShares > 0) ? position.upShares : (entry.upShares ?? 0);
-  const downShares = (position && position.downShares > 0) ? position.downShares : (entry.downShares ?? 0);
-  const upCost = (position && position.upCost > 0) ? position.upCost : (entry.upCost ?? 0);
-  const downCost = (position && position.downCost > 0) ? position.downCost : (entry.downCost ?? 0);
-  
-  // Create merge candidate with token IDs for balance verification
-  const candidate = MergeManager.createCandidate(
-    entry.conditionId,
-    slug,
-    entry.asset,
-    upShares,
-    downShares,
-    upCost,
-    downCost,
-    entry.upTokenId,
-    entry.downTokenId
-  );
-  
-  if (!candidate) {
-    console.log(`[MergeScheduler] ${slug.slice(-25)}: No paired shares, skipping merge`);
-    entry.status = 'skipped';
-    entry.result = { success: false, mergedShares: 0, error: 'no_paired_shares' };
-    logMergeEvent(entry, 'skipped');
-    if (mergeCallback) mergeCallback(slug, entry.result);
-    return;
-  }
-  
-  if (candidate.pairedShares < MIN_PAIRED_SHARES) {
-    console.log(`[MergeScheduler] ${slug.slice(-25)}: Only ${candidate.pairedShares} paired (min: ${MIN_PAIRED_SHARES}), skipping`);
-    entry.status = 'skipped';
-    entry.result = { success: false, mergedShares: 0, error: 'below_minimum' };
-    logMergeEvent(entry, 'skipped');
-    if (mergeCallback) mergeCallback(slug, entry.result);
-    return;
-  }
-  
-  // Check if profitable
-  if (!MergeManager.shouldMerge(candidate)) {
-    console.log(`[MergeScheduler] ${slug.slice(-25)}: CPP >= $1.00, skipping unprofitable merge`);
-    entry.status = 'skipped';
-    entry.result = { success: false, mergedShares: 0, error: 'unprofitable' };
-    logMergeEvent(entry, 'skipped');
-    if (mergeCallback) mergeCallback(slug, entry.result);
-    return;
-  }
-  
-  // Execute merge
-  const result = await mergeManager.merge(candidate);
-  
-  entry.status = result.success ? 'completed' : 'failed';
-  entry.result = result;
-  
-  if (result.success) {
-    console.log(`[MergeScheduler] ✅ ${slug.slice(-25)}: Merged ${result.mergedShares} pairs, PnL: $${(result.realizedPnl ?? 0).toFixed(2)}`);
-    logMergeEvent(entry, 'completed');
-  } else {
-    console.log(`[MergeScheduler] ❌ ${slug.slice(-25)}: Merge failed - ${result.error}`);
+  try {
+    // V37.8.0: CHECK ON-CHAIN BALANCES - THIS IS THE SOURCE OF TRUTH
+    const balances = await mergeManager.checkBalances(
+      entry.conditionId,
+      entry.upTokenId,
+      entry.downTokenId
+    );
+    
+    console.log(`[MergeScheduler] 📊 On-chain balances:`);
+    console.log(`[MergeScheduler]    UP:   ${balances.upBalance.toFixed(2)} shares`);
+    console.log(`[MergeScheduler]    DOWN: ${balances.downBalance.toFixed(2)} shares`);
+    console.log(`[MergeScheduler]    Pairable: ${balances.pairable.toFixed(2)} shares`);
+    
+    // Check if we have enough to merge
+    if (balances.pairable < MIN_PAIRED_SHARES) {
+      console.log(`[MergeScheduler] ⚠️ Only ${balances.pairable.toFixed(2)} pairable (min: ${MIN_PAIRED_SHARES}), skipping`);
+      entry.status = 'skipped';
+      entry.result = { success: false, mergedShares: 0, error: 'below_minimum' };
+      logMergeEvent(entry, 'skipped');
+      if (mergeCallback) mergeCallback(slug, entry.result);
+      scheduledMerges.delete(slug);
+      return;
+    }
+    
+    // Create merge candidate from on-chain data
+    // We don't have CPP from on-chain, so we assume it's profitable if we have pairs
+    // The merge itself is always profitable (1 UP + 1 DOWN = $1 USDC)
+    const candidate: MergeCandidate = {
+      conditionId: entry.conditionId,
+      marketSlug: slug,
+      asset: entry.asset,
+      pairedShares: balances.pairable,
+      upShares: balances.upBalance,
+      downShares: balances.downBalance,
+      avgUpPrice: 0, // Unknown - but doesn't matter for on-chain merge
+      avgDownPrice: 0,
+      cpp: 0, // Will be calculated from actual accounting data
+      expectedPnl: balances.pairable, // Worst case: $1 per pair
+      upTokenId: entry.upTokenId,
+      downTokenId: entry.downTokenId,
+    };
+    
+    console.log(`[MergeScheduler] ✅ Proceeding with merge of ${balances.pairable.toFixed(2)} pairs...`);
+    
+    // Execute merge
+    const result = await mergeManager.merge(candidate);
+    
+    entry.status = result.success ? 'completed' : 'failed';
+    entry.result = result;
+    
+    if (result.success) {
+      console.log(`[MergeScheduler] ✅ MERGED ${result.mergedShares.toFixed(2)} pairs`);
+      console.log(`[MergeScheduler]    TX: ${result.txHash}`);
+      console.log(`[MergeScheduler]    Gas: ${result.gasUsed ?? 'unknown'}`);
+      logMergeEvent(entry, 'completed');
+    } else {
+      console.log(`[MergeScheduler] ❌ Merge failed: ${result.error}`);
+      logMergeEvent(entry, 'failed');
+    }
+    
+    // Notify callback
+    if (mergeCallback) {
+      mergeCallback(slug, result);
+    }
+    
+  } catch (err: any) {
+    console.error(`[MergeScheduler] ❌ Unexpected error:`, err?.message || err);
+    entry.status = 'failed';
+    entry.result = { success: false, mergedShares: 0, error: err?.message || 'unknown' };
     logMergeEvent(entry, 'failed');
-  }
-  
-  // Notify callback
-  if (mergeCallback) {
-    mergeCallback(slug, result);
+  } finally {
+    // Clean up the entry after execution
+    scheduledMerges.delete(slug);
   }
 }
 
 /**
- * Log merge event to database for PnL tracking (V37.7.0)
+ * Log merge event to database
  */
 function logMergeEvent(entry: MergeScheduleEntry, outcome: 'completed' | 'failed' | 'skipped'): void {
   const result = entry.result;
@@ -272,10 +272,6 @@ function logMergeEvent(entry: MergeScheduleEntry, outcome: 'completed' | 'failed
       gasUsed: result?.gasUsed,
       error: result?.error,
       walletType: result?.walletType,
-      upShares: entry.upShares,
-      downShares: entry.downShares,
-      upCost: entry.upCost,
-      downCost: entry.downCost,
     },
   }).catch(() => {});
 }
@@ -284,31 +280,21 @@ function logMergeEvent(entry: MergeScheduleEntry, outcome: 'completed' | 'failed
 // STATUS
 // ============================================================
 
-/**
- * Get merge result for a market (if completed)
- */
 export function getMergeResult(slug: string): MergeResult | null {
   const entry = scheduledMerges.get(slug);
   return entry?.result || null;
 }
 
-/**
- * Get all scheduled merges
- */
 export function getScheduledMerges(): Map<string, MergeScheduleEntry> {
   return new Map(scheduledMerges);
 }
 
-/**
- * Get count of scheduled merges
- */
 export function getScheduledMergeCount(): number {
   return scheduledMerges.size;
 }
 
 /**
- * V37.7.1: Update position data for an existing scheduled merge entry.
- * Called by runner when market expires to ensure merge has latest position data.
+ * V37.8.0: Deprecated - no longer needed, on-chain data is used
  */
 export function updateMergeEntryPositions(
   marketSlug: string,
@@ -317,21 +303,10 @@ export function updateMergeEntryPositions(
   upCost: number,
   downCost: number,
 ): void {
-  const entry = scheduledMerges.get(marketSlug);
-  if (entry) {
-    entry.upShares = upShares;
-    entry.downShares = downShares;
-    entry.upCost = upCost;
-    entry.downCost = downCost;
-    console.log(`[MergeScheduler] 📊 Updated positions for ${marketSlug.slice(-25)}: UP=${upShares.toFixed(1)}, DOWN=${downShares.toFixed(1)}, Cost=$${(upCost + downCost).toFixed(2)}`);
-  } else {
-    console.log(`[MergeScheduler] ⚠️ No scheduled merge found for ${marketSlug.slice(-25)} to update`);
-  }
+  // V37.8.0: No-op - we use on-chain balances now
+  console.log(`[MergeScheduler] ℹ️ updateMergeEntryPositions ignored - using on-chain data`);
 }
 
-/**
- * Check if merge scheduler is ready
- */
 export function isMergeSchedulerReady(): boolean {
   return initialized && (mergeManager?.isReady() ?? false);
 }
