@@ -22,7 +22,9 @@ import { processFill as processAccountingFill, getEntry } from '../accounting-le
 const CTF_ABI = [
   'function mergePositions(address collateral, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition, uint256 amount) external',
   'function balanceOf(address owner, uint256 positionId) external view returns (uint256)',
-  'function getPositionId(address collateral, bytes32 collectionId) external view returns (uint256)',
+  // Conditional Tokens helpers (pure)
+  'function getCollectionId(bytes32 parentCollectionId, bytes32 conditionId, uint256 indexSet) external pure returns (bytes32)',
+  'function getPositionId(address collateral, bytes32 collectionId) external pure returns (uint256)',
 ];
 
 // Gnosis Safe ABI for proxy execution
@@ -163,58 +165,73 @@ export class MergeManager {
   // ============================================================
   
   async checkBalances(
-    conditionId: string, 
-    upTokenId?: string, 
-    downTokenId?: string
+    conditionId: string,
+    _upTokenId?: string,
+    _downTokenId?: string
   ): Promise<{ upBalance: number; downBalance: number; pairable: number }> {
     if (!this.provider || !this.ctfContract) {
       return { upBalance: 0, downBalance: 0, pairable: 0 };
     }
-    
+
     const holderAddress = this.proxyAddress || this.signer?.address;
     if (!holderAddress) {
       return { upBalance: 0, downBalance: 0, pairable: 0 };
     }
-    
+
+    const conditionIdBytes = conditionId.startsWith('0x') ? conditionId : `0x${conditionId}`;
+    if (conditionIdBytes.length !== 66) {
+      console.warn(`[MergeManager] Invalid conditionId (expected bytes32): "${conditionId}"`);
+      return { upBalance: 0, downBalance: 0, pairable: 0 };
+    }
+
     try {
-      // Position IDs are keccak256(collateral, collectionId, outcomeIndex)
-      // For binary markets: outcomeIndex 0 = UP, outcomeIndex 1 = DOWN
-      const upPositionId = upTokenId 
-        ? BigNumber.from(upTokenId) 
-        : this.computePositionId(conditionId, 0);
-      const downPositionId = downTokenId 
-        ? BigNumber.from(downTokenId) 
-        : this.computePositionId(conditionId, 1);
-      
+      // IMPORTANT:
+      // Market discovery provides CLOB token IDs, which are NOT the same as
+      // Conditional Tokens (CTF) ERC1155 position IDs.
+      // For on-chain balances we MUST derive the CTF position IDs from conditionId.
+      const [upPositionId, downPositionId] = await Promise.all([
+        this.getPositionIdForIndexSet(conditionIdBytes, 1), // indexSet 1
+        this.getPositionIdForIndexSet(conditionIdBytes, 2), // indexSet 2
+      ]);
+
       const [upBalanceBN, downBalanceBN] = await Promise.all([
         this.ctfContract.balanceOf(holderAddress, upPositionId),
         this.ctfContract.balanceOf(holderAddress, downPositionId),
       ]);
-      
+
       const upBalance = parseFloat(ethers.utils.formatUnits(upBalanceBN, 6));
       const downBalance = parseFloat(ethers.utils.formatUnits(downBalanceBN, 6));
       const pairable = Math.min(upBalance, downBalance);
-      
+
       return { upBalance, downBalance, pairable };
     } catch (err: any) {
       console.warn(`[MergeManager] Balance check failed: ${err?.message}`);
       return { upBalance: 0, downBalance: 0, pairable: 0 };
     }
   }
-  
-  private computePositionId(conditionId: string, outcomeIndex: number): BigNumber {
-    // CTF position ID = hash(collateral, collectionId(conditionId, indexSet))
-    // For simplicity, we use the tokenId format from market discovery
-    // This is a placeholder - actual implementation depends on market data
-    const indexSet = 1 << outcomeIndex; // 1 for UP, 2 for DOWN
-    const collectionId = ethers.utils.solidityKeccak256(
-      ['bytes32', 'uint256'],
-      [conditionId.startsWith('0x') ? conditionId : `0x${conditionId}`, indexSet]
-    );
-    return BigNumber.from(ethers.utils.solidityKeccak256(
-      ['address', 'bytes32'],
-      [USDC_ADDRESS, collectionId]
-    ));
+
+  private async getPositionIdForIndexSet(conditionIdBytes: string, indexSet: number): Promise<BigNumber> {
+    if (!this.ctfContract) return BigNumber.from(0);
+
+    // Prefer calling into the contract (pure function) to avoid hash mismatches.
+    try {
+      const collectionId = await (this.ctfContract as any).getCollectionId(
+        PARENT_COLLECTION_ID,
+        conditionIdBytes,
+        indexSet
+      );
+      const positionId = await (this.ctfContract as any).getPositionId(USDC_ADDRESS, collectionId);
+      return BigNumber.from(positionId);
+    } catch {
+      // Fallback: reproduce the ConditionalTokens collectionId derivation.
+      // collectionId = keccak256(abi.encodePacked(parentCollectionId, conditionId, indexSet))
+      const collectionId = ethers.utils.solidityKeccak256(
+        ['bytes32', 'bytes32', 'uint256'],
+        [PARENT_COLLECTION_ID, conditionIdBytes, indexSet]
+      );
+      const positionId = await (this.ctfContract as any).getPositionId(USDC_ADDRESS, collectionId);
+      return BigNumber.from(positionId);
+    }
   }
   
   // ============================================================
