@@ -465,7 +465,7 @@ Deno.serve(async (req) => {
       // Get markets from market_history
       const { data: markets, error: marketsError } = await supabase
         .from('market_history')
-        .select('slug, event_start_time, event_expiry_time, strike_price, open_price, result')
+        .select('slug, event_start_time, event_end_time, strike_price, open_price, result')
         .eq('asset', asset)
         .gte('event_start_time', cutoff)
         .not('event_start_time', 'is', null)
@@ -561,7 +561,7 @@ Deno.serve(async (req) => {
         results.push({
           market_slug: market.slug,
           start_time: market.event_start_time,
-          expiry_time: market.event_expiry_time || null,
+          expiry_time: market.event_end_time || null,
           strike_price: market.strike_price || market.open_price || (marketTicks[0]?.strike_price) || null,
           winning_side: market.result || null,
           up_ask_at_1min: oneMinTick?.up_best_ask || null,
